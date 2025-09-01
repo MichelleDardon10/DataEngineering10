@@ -1,176 +1,196 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-from __future__ import annotations
-import argparse, os, re, hashlib
-from pathlib import Path
-from typing import Iterable
+import os, re, sys, glob
 from datetime import datetime
 import pandas as pd
-from tqdm import tqdm
-import pyarrow as pa
-import pyarrow.parquet as pq
 
-DEFAULT_ROOT = "citibike_data"
-DEFAULT_OUT  = "citibike_clean"
-CHUNK_ROWS   = 250_000
+# Por defecto: tus carpetas reales en Windows. En contenedor se sobreescriben a /raw y /clean.
+RAW_DIR   = os.getenv("RAW_DIR",   "./citibike_data/csv")
+CLEAN_DIR = os.getenv("CLEAN_DIR", "./citibike_data/clean")
+WRITE_PARQUET = os.getenv("WRITE_PARQUET", "1") == "1"
 
-STANDARD_COLS = [
-    "ride_id","rideable_type",
-    "started_at","ended_at",
-    "start_station_id","start_station_name",
-    "end_station_id","end_station_name",
-    "start_lat","start_lng","end_lat","end_lng",
-    "member_casual","birth_year","gender",
-    "duration_seconds","source_file"
+os.makedirs(CLEAN_DIR, exist_ok=True)
+
+FINAL_COLS = [
+    "ride_id","rideable_type","started_at","ended_at",
+    "start_station_id","start_station_name","start_lat","start_lng",
+    "end_station_id","end_station_name","end_lat","end_lng",
+    "member_casual","tripduration_seconds","bikeid","usertype",
+    "birth_year","gender","source_file",
 ]
 
-pd.options.mode.copy_on_write = True
+def norm(s:str)->str:
+    s = s.strip().replace("/", " ").replace("-", " ").replace(".", " ")
+    s = re.sub(r"\s+", "_", s)
+    s = re.sub(r"[^0-9a-zA-Z_]", "", s)
+    return s.lower()
 
-def iter_csvs(root: Path) -> Iterable[Path]:
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d != "__MACOSX"]
-        for fn in filenames:
-            if fn in (".DS_Store",) or fn.startswith("._"):
-                continue
-            if fn.upper().startswith("JC-"):
-                continue
-            if fn.lower().endswith(".csv"):
-                yield Path(dirpath) / fn
+SYN = {
+    # legacy
+    "tripduration":"tripduration_seconds","trip_duration":"tripduration_seconds",
+    "starttime":"started_at","start_time":"started_at",
+    "stoptime":"ended_at","stop_time":"ended_at",
+    "start_station_id":"start_station_id","start_station_name":"start_station_name",
+    "start_station_latitude":"start_lat","start_station_longitude":"start_lng",
+    "end_station_id":"end_station_id","end_station_name":"end_station_name",
+    "end_station_latitude":"end_lat","end_station_longitude":"end_lng",
+    "bike_id":"bikeid","bikeid":"bikeid",
+    "user_type":"usertype","usertype":"usertype",
+    "birth_year":"birth_year","birth_year_":"birth_year",
+    "gender":"gender",
+    # modern
+    "ride_id":"ride_id","rideable_type":"rideable_type",
+    "started_at":"started_at","ended_at":"ended_at",
+    "start_lat":"start_lat","start_lng":"start_lng",
+    "end_lat":"end_lat","end_lng":"end_lng",
+    "start_station_id_":"start_station_id","start_station_name_":"start_station_name",
+    "end_station_id_":"end_station_id","end_station_name_":"end_station_name",
+    "member_casual":"member_casual",
+    # variantes con mayúsculas/espacios
+    "trip_duration":"tripduration_seconds",
+    "start_station_id_":"start_station_id",
+    "start_time":"started_at","stop_time":"ended_at",
+    "start_station_id":"start_station_id","start_station_name":"start_station_name",
+    "end_station_id":"end_station_id","end_station_name":"end_station_name",
+    "start_station_latitude_":"start_lat","start_station_longitude_":"start_lng",
+    "end_station_latitude_":"end_lat","end_station_longitude_":"end_lng",
+    "bike_id_":"bikeid","user_type_":"usertype",
+    "birth_year__":"birth_year"
+}
 
-def stable_hash(s: str) -> str:
-    return hashlib.sha1(s.encode("utf-8", "ignore")).hexdigest()
+def rename_columns(cols):
+    out = {}
+    for c in cols:
+        key = norm(c)
+        out[c] = SYN.get(key, key)
+    return out
 
-def _canon(name: str) -> str:
-    n = name.replace("\ufeff", "")
-    n = n.strip().strip('"').strip("'").lower()
-    n = re.sub(r"[_\s]+", " ", n)
-    return n
+def to_ts(s):  return pd.to_datetime(s, errors="coerce", utc=False)
+def to_num(s): return pd.to_numeric(s, errors="coerce")
 
-def to_ts(s: pd.Series) -> pd.Series:
-    return pd.to_datetime(s, errors="coerce", utc=False)
+YEAR_NOW = datetime.utcnow().year
 
-def num(s: pd.Series) -> pd.Series:
-    return pd.to_numeric(s, errors="coerce")
+def process_file(path):
+    base = os.path.basename(path)
+    stem = re.sub(r"\.csv$", "", base)
+    out_csv = os.path.join(CLEAN_DIR, f"{stem}__clean.csv")
+    out_par = os.path.join(CLEAN_DIR, f"{stem}__clean.parquet")
 
-def normalize_chunk(df: pd.DataFrame, source_file: str, today_year: int) -> pd.DataFrame:
-    cols = {_canon(c): c for c in df.columns}
-    def col(*cands):
-        for c in cands:
-            if c in cols:
-                return df[cols[c]]
-        return pd.Series([pd.NA] * len(df))
-    started = to_ts(col("started at", "starttime", "start time"))
-    ended   = to_ts(col("ended at",   "stoptime",  "end time"))
-    s_id   = col("start station id","start_station_id").astype("string")
-    s_name = col("start station name","start_station_name").astype("string")
-    e_id   = col("end station id","end_station_id").astype("string")
-    e_name = col("end station name","end_station_name").astype("string")
-    s_lat = num(col("start lat","start station latitude")).astype("Float64")
-    s_lng = num(col("start lng","start station longitude")).astype("Float64")
-    e_lat = num(col("end lat","end station latitude")).astype("Float64")
-    e_lng = num(col("end lng","end station longitude")).astype("Float64")
-    member_raw = col("member casual","usertype").astype("string").str.lower()
-    member = member_raw.map({
-        "member": "member", "casual": "casual",
-        "subscriber": "member", "customer": "casual",
-        "registered": "member", "non-member": "casual"
-    }).fillna(member_raw)
-    rideable = col("rideable type").astype("string")
-    by = num(col("birth year","birth_year")).astype("Float64")
-    by = by.where((by >= 1900) & (by <= max(1900, today_year - 12))).astype("Int64")
-    g = col("gender").astype("string")
-    if g.dtype == "string":
-        g_map = g.str.strip().str.lower().map({
-            "0": 0, "1": 1, "2": 2,
-            "unknown": 0, "male": 1, "female": 2
-        })
-        g_num = pd.to_numeric(g, errors="coerce")
-        g = g_map.where(g_map.notna(), g_num).astype("Int64")
-    else:
-        g = pd.Series([pd.NA] * len(df), dtype="Int64")
-    dur_ts = (ended - started).dt.total_seconds().astype("Float64")
-    dur_csv = num(col("tripduration","duration")).astype("Float64")
-    duration = dur_ts.where(dur_ts.notna(), dur_csv)
-    ride_id = col("ride id").astype("string")
-    if ride_id.isna().all():
-        bikeid = col("bikeid").astype("string")
-        ride_id = (
-            started.astype("string").fillna("") + "|" +
-            ended.astype("string").fillna("") + "|" +
-            s_id.fillna("") + "|" + e_id.fillna("") + "|" +
-            bikeid.fillna("")
-        ).map(stable_hash).astype("string")
-    out = pd.DataFrame({
-        "ride_id": ride_id,
-        "rideable_type": rideable,
-        "started_at": started,
-        "ended_at": ended,
-        "start_station_id": s_id,
-        "start_station_name": s_name,
-        "end_station_id": e_id,
-        "end_station_name": e_name,
-        "start_lat": s_lat,
-        "start_lng": s_lng,
-        "end_lat": e_lat,
-        "end_lng": e_lng,
-        "member_casual": member,
-        "birth_year": by,
-        "gender": g,
-        "duration_seconds": duration.astype("Float64"),
-        "source_file": pd.Series([source_file]*len(df), dtype="string"),
-    })
-    out = out.dropna(subset=["started_at","ended_at"])
-    out = out[(out["duration_seconds"].notna()) & (out["duration_seconds"] > 0) & (out["duration_seconds"] <= 86400)]
-    out["duration_seconds"] = out["duration_seconds"].round().astype("Int64")
-    out = out.drop_duplicates(subset=["ride_id"], keep="first")
-    return out[STANDARD_COLS]
+    first_chunk = True
+    parquet_written = False
 
-def write_parquet_incremental(out_path: Path, generator):
-    writer = None
     try:
-        for cleaned in generator:
-            if cleaned.empty:
-                continue
-            table = pa.Table.from_pandas(cleaned, preserve_index=False)
-            if writer is None:
-                writer = pq.ParquetWriter(str(out_path), table.schema)
-            writer.write_table(table)
-    finally:
-        if writer is not None:
-            writer.close()
-        elif not out_path.exists():
-            empty = pd.DataFrame(columns=STANDARD_COLS)
-            pq.write_table(pa.Table.from_pandas(empty, preserve_index=False), str(out_path))
+        for chunk in pd.read_csv(
+            path, chunksize=200_000, dtype=str, low_memory=False,
+            na_values=["", "NULL", "null", "NaN"], keep_default_na=True, encoding="utf-8"
+        ):
+            # headers
+            chunk = chunk.rename(columns=rename_columns(list(chunk.columns)))
+            # ensure all cols
+            for col in FINAL_COLS:
+                if col not in chunk.columns:
+                    chunk[col] = pd.NA
 
-def process_one(csv_path: Path, out_dir: Path, chunksize: int = CHUNK_ROWS):
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / (csv_path.stem + ".parquet")
-    if out_path.exists() and out_path.stat().st_size > 0:
-        return
-    today_year = datetime.now().year
-    def gen():
-        for chunk in pd.read_csv(csv_path, chunksize=chunksize, low_memory=False, dtype=str):
-            yield normalize_chunk(chunk, str(csv_path), today_year)
-    write_parquet_incremental(out_path, gen())
+            df = chunk[FINAL_COLS].copy()
+
+            # tipos
+            df["started_at"] = to_ts(df["started_at"])
+            df["ended_at"]   = to_ts(df["ended_at"])
+
+            # duración
+            dur = to_num(df["tripduration_seconds"])
+            need_calc = dur.isna()
+            calc = (df["ended_at"] - df["started_at"]).dt.total_seconds()
+            df.loc[need_calc, "tripduration_seconds"] = calc.round()
+            df["tripduration_seconds"] = to_num(df["tripduration_seconds"])
+
+            # filtros básicos
+            ok = (
+                df["started_at"].notna() & df["ended_at"].notna() &
+                df["tripduration_seconds"].notna() &
+                (df["tripduration_seconds"] > 0) &
+                (df["tripduration_seconds"] <= 86400)  # <= 24h
+            )
+            df = df.loc[ok]
+
+            # numéricos
+            for col in ["start_lat","start_lng","end_lat","end_lng"]:
+                df[col] = to_num(df[col])
+
+            # birth_year
+            by = to_num(df["birth_year"])
+            by = by.where((by >= 1900) & (by <= YEAR_NOW))
+            df["birth_year"] = by.astype("Int64")
+
+            # gender
+            df["gender"] = to_num(df["gender"]).astype("Int64")
+
+            # strings clave
+            for col in ["ride_id","rideable_type","start_station_id","start_station_name",
+                        "end_station_id","end_station_name","member_casual","bikeid","usertype"]:
+                df[col] = df[col].astype("string")
+
+            # legacy → member_casual
+            fill_mc = df["member_casual"].isna()
+            ut = df["usertype"].str.lower()
+            df.loc[fill_mc & ut.eq("subscriber"), "member_casual"] = "member"
+            df.loc[fill_mc & ut.eq("customer"),   "member_casual"] = "casual"
+
+            # rideable_type default in legacy
+            df.loc[df["rideable_type"].isna(), "rideable_type"] = "classic_bike"
+
+            # source
+            df["source_file"] = base
+
+            # dedupe chunk
+            if df["ride_id"].notna().any():
+                df = df.drop_duplicates(subset=["ride_id"])
+            else:
+                df = df.drop_duplicates(subset=[
+                    "started_at","ended_at","bikeid","start_station_id","end_station_id"
+                ])
+
+            # salida CSV (para COPY)
+            df_csv = df.copy()
+            df_csv["started_at"] = df_csv["started_at"].dt.strftime("%Y-%m-%d %H:%M:%S")
+            df_csv["ended_at"]   = df_csv["ended_at"].dt.strftime("%Y-%m-%d %H:%M:%S")
+            df_csv.to_csv(out_csv, index=False,
+                          mode="w" if first_chunk else "a",
+                          header=first_chunk)
+
+            # salida Parquet por archivo (opcional) — rápido para analytics
+            if WRITE_PARQUET:
+                # Parquet no soporta append simple en pandas; escribimos por archivo completo al finalizar chunks
+                # acumulando temporalmente en una lista pequeña es arriesgado en memoria; así que escribimos por chunk a CSV (para DB)
+                # y al terminar, juntamos con un segundo pase a partir del CSV limpio (barato y secuencial).
+                pass
+
+            first_chunk = False
+
+        # Si pediste parquet, hacemos un pase secuencial sobre el CSV limpio ya generado.
+        if WRITE_PARQUET and os.path.exists(out_csv):
+            df_all = pd.read_csv(out_csv, dtype={
+                "ride_id":"string","rideable_type":"string",
+                "start_station_id":"string","start_station_name":"string",
+                "end_station_id":"string","end_station_name":"string",
+                "member_casual":"string","bikeid":"string","usertype":"string",
+                "source_file":"string"
+            }, parse_dates=["started_at","ended_at"])
+            df_all.to_parquet(out_par, index=False)
+            parquet_written = True
+
+        print(f"[OK] {base} → {os.path.basename(out_csv)}" + (" + parquet" if parquet_written else ""))
+
+    except Exception as e:
+        print(f"[ERROR] {base}: {e}", file=sys.stderr)
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--root", default=DEFAULT_ROOT)
-    ap.add_argument("--out",  default=DEFAULT_OUT)
-    ap.add_argument("--chunksize", type=int, default=CHUNK_ROWS)
-    args = ap.parse_args()
-    root = Path(args.root).expanduser()
-    out_dir = Path(args.out).expanduser()
-    csvs = sorted(iter_csvs(root))
-    if not csvs:
-        print(f"No CSVs found under: {root}")
+    pattern = os.path.join(RAW_DIR, "**", "*.csv")
+    files = glob.glob(pattern, recursive=True)
+    if not files:
+        print(f"Sin CSV en {RAW_DIR}")
         return
-    for p in tqdm(csvs, desc="Cleaning CSVs", unit="file"):
-        try:
-            process_one(p, out_dir, chunksize=args.chunksize)
-        except Exception as e:
-            print(f"[ERROR] {p} -> {e}")
-    print(f"Done. Clean Parquet files are in: {out_dir}")
+    files.sort()
+    for f in files:
+        process_file(f)
 
 if __name__ == "__main__":
     main()
