@@ -1,0 +1,73 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: citibike_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: citibike
+    ports:
+      - "5432:5432"
+    volumes:
+      - type: volume
+        source: db_data
+        target: /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d citibike"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  loader:
+    image: python:3.11-slim
+    working_dir: /app
+    environment:
+      RAW_DIR: /data/raw
+      PGHOST: db
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: citibike
+      PGPORT: 5432
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - type: bind
+        source: "load_to_pg.py"
+        target: /app/load_to_pg.py
+        read_only: true
+      - type: bind
+        source: "../citibike_data/clean"
+        target: /data/raw
+        read_only: true
+    command: ["sh","-lc","pip install --no-cache-dir pandas numpy psycopg2-binary pyarrow && python /app/load_to_pg.py"]
+    restart: "on-failure"
+
+  dashboard:
+    image: python:3.11-slim
+    working_dir: /app
+    environment:
+      PGHOST: db
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: citibike
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8501:8501"
+    volumes:
+      - type: bind
+        source: "app.py"
+        target: /app/app.py
+        read_only: true
+      - type: bind
+        source: "requirements-dashboard.txt"
+        target: /app/requirements.txt
+        read_only: true
+    command: ["sh","-lc","pip install --no-cache-dir -r requirements.txt && streamlit run app.py --server.address=0.0.0.0 --server.port=8501"]
+    restart: "on-failure"
+
+volumes:
+  db_data:

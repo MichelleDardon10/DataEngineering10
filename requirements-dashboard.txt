@@ -1,0 +1,4 @@
+streamlit
+pandas
+numpy
+psycopg2-binary
