@@ -1,36 +1,75 @@
+# -*- coding: utf-8 -*-
 import os
-from datetime import date
 import pandas as pd
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from psycopg2.pool import ThreadedConnectionPool
+from contextlib import contextmanager
 import streamlit as st
 
 # ------------------ Conn ------------------
-PGHOST = os.getenv("PGHOST", "localhost")
+PGHOST = os.getenv("PGHOST", "db")  # nombre del servicio en Compose
 PGPORT = int(os.getenv("PGPORT", "5432"))
 PGUSER = os.getenv("PGUSER", "postgres")
 PGPASSWORD = os.getenv("PGPASSWORD", "postgres")
 PGDATABASE = os.getenv("PGDATABASE", "citibike")
 
 SCHEMA = "citibike"
-TABLE  = "trips"
+TABLE = "trips"
 
 st.set_page_config(page_title="CitiBike Dashboard", layout="wide")
 
 @st.cache_resource(show_spinner=False)
-def get_conn():
-    return psycopg2.connect(
-        host=PGHOST, port=PGPORT, user=PGUSER,
-        password=PGPASSWORD, dbname=PGDATABASE,
-        cursor_factory=RealDictCursor
+def get_pool() -> ThreadedConnectionPool:
+    return ThreadedConnectionPool(
+        minconn=1,
+        maxconn=10,
+        host=PGHOST,
+        port=PGPORT,
+        user=PGUSER,
+        password=PGPASSWORD,
+        dbname=PGDATABASE,
+        cursor_factory=RealDictCursor,
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=5,
     )
+
+@contextmanager
+def get_cursor():
+    pool = get_pool()
+    conn = pool.getconn()
+    try:
+        if getattr(conn, "closed", 0):
+            pool.putconn(conn, close=True)
+            conn = pool.getconn()
+        with conn.cursor() as cur:
+            yield cur
+    finally:
+        try:
+            pool.putconn(conn)
+        except Exception:
+            pass
 
 @st.cache_data(ttl=300, show_spinner=False)
 def query_df(sql: str, params: dict | None = None) -> pd.DataFrame:
-    with get_conn().cursor() as cur:
-        cur.execute(sql, params or {})
-        rows = cur.fetchall()
-    return pd.DataFrame(rows)
+    def _run():
+        with get_cursor() as cur:
+            cur.execute(sql, params or {})
+            rows = cur.fetchall()
+        return pd.DataFrame(rows)
+
+    try:
+        return _run()
+    except psycopg2.InterfaceError:
+        # Conexión rota: resetea y reintenta
+        pool = get_pool()
+        try:
+            pool.closeall()
+        except Exception:
+            pass
+        return _run()
 
 st.title("🚲 CitiBike – Dashboard")
 
@@ -59,7 +98,7 @@ if start_date > end_date:
     st.stop()
 
 member_filter = st.sidebar.multiselect(
-    "Tipo de usuario", options=["member","casual"], default=["member","casual"]
+    "Tipo de usuario", options=["member","casual","unknown"], default=["member","casual","unknown"]
 )
 
 where = ["started_at >= %(d0)s::date", "started_at < (%(d1)s::date + interval '1 day')"]
@@ -93,12 +132,15 @@ with tab_summary:
             FROM {SCHEMA}.{TABLE}
             {where_sql};
         """, params)
-    ca, cb, cc, cd, ce = st.columns(5)
-    ca.metric("Viajes", f"{int(kpis.at[0,'trips']):,}")
-    cb.metric("Duración promedio (s)", f"{float(kpis.at[0,'avg_secs'] or 0):.0f}")
-    cc.metric("Duración mediana (s)", f"{float(kpis.at[0,'p50_secs'] or 0):.0f}")
-    cd.metric("Est. origen", f"{int(kpis.at[0,'start_stations']):,}")
-    ce.metric("Est. destino", f"{int(kpis.at[0,'end_stations']):,}")
+    if not kpis.empty:
+        ca, cb, cc, cd, ce = st.columns(5)
+        ca.metric("Viajes", f"{int(kpis.at[0,'trips']):,}")
+        cb.metric("Duración promedio (s)", f"{float(kpis.at[0,'avg_secs'] or 0):.0f}")
+        cc.metric("Duración mediana (s)", f"{float(kpis.at[0,'p50_secs'] or 0):.0f}")
+        cd.metric("Est. origen", f"{int(kpis.at[0,'start_stations']):,}")
+        ce.metric("Est. destino", f"{int(kpis.at[0,'end_stations']):,}")
+    else:
+        st.info("Sin datos para los filtros.")
 
 with tab_series:
     st.subheader("📈 Viajes por día")
@@ -113,6 +155,7 @@ with tab_series:
     if daily.empty:
         st.info("Sin datos en el rango/segmento seleccionado.")
     else:
+        daily = daily.astype({"trips":"int64"})
         st.line_chart(daily.set_index("day")["trips"])
 
 with tab_stations:
@@ -120,7 +163,7 @@ with tab_stations:
     with c1:
         st.subheader("🏁 Top estaciones de origen")
         top_start = query_df(f"""
-            SELECT COALESCE(start_station_name, start_station_id) AS station,
+            SELECT COALESCE(start_station_name, start_station_id::text) AS station,
                    COUNT(*)::bigint AS trips
             FROM {SCHEMA}.{TABLE}
             {where_sql}
@@ -129,11 +172,12 @@ with tab_stations:
         if top_start.empty:
             st.info("Sin datos.")
         else:
+            top_start = top_start.astype({"trips":"int64"})
             st.bar_chart(top_start.set_index("station")["trips"])
     with c2:
         st.subheader("🎯 Top estaciones de destino")
         top_end = query_df(f"""
-            SELECT COALESCE(end_station_name, end_station_id) AS station,
+            SELECT COALESCE(end_station_name, end_station_id::text) AS station,
                    COUNT(*)::bigint AS trips
             FROM {SCHEMA}.{TABLE}
             {where_sql}
@@ -142,6 +186,7 @@ with tab_stations:
         if top_end.empty:
             st.info("Sin datos.")
         else:
+            top_end = top_end.astype({"trips":"int64"})
             st.bar_chart(top_end.set_index("station")["trips"])
 
 with tab_dur:
@@ -177,14 +222,13 @@ with tab_map:
     else:
         st.map(pts.rename(columns={"start_lat":"lat","start_lng":"lon"}))
 
-
 # --------- Nuevo Tab: Análisis general ---------
 tab_general, = st.tabs(["Análisis general"])
 
 with tab_general:
     st.subheader("🔝 Bicis más usadas")
     top_bikes = query_df(f"""
-        SELECT bikeid, COUNT(*) AS viajes
+        SELECT bikeid, COUNT(*)::bigint AS viajes
         FROM {SCHEMA}.{TABLE}
         {where_sql}
         GROUP BY bikeid
@@ -192,6 +236,7 @@ with tab_general:
         LIMIT 10;
     """, params)
     if not top_bikes.empty:
+        top_bikes = top_bikes.astype({"viajes":"int64"})
         st.bar_chart(top_bikes.set_index("bikeid")["viajes"])
     else:
         st.info("No hay datos para el rango seleccionado.")
@@ -199,12 +244,13 @@ with tab_general:
     st.divider()
     st.subheader("⏰ Horas pico de uso")
     hours = query_df(f"""
-        SELECT EXTRACT(HOUR FROM started_at) AS hora, COUNT(*) AS viajes
+        SELECT EXTRACT(HOUR FROM started_at)::int AS hora, COUNT(*)::bigint AS viajes
         FROM {SCHEMA}.{TABLE}
         {where_sql}
         GROUP BY hora ORDER BY hora;
     """, params)
     if not hours.empty:
+        hours = hours.astype({"viajes":"int64"})
         st.bar_chart(hours.set_index("hora")["viajes"])
     else:
         st.info("No hay datos.")
@@ -212,7 +258,7 @@ with tab_general:
     st.divider()
     st.subheader("📅 Viajes por día de la semana")
     dow = query_df(f"""
-        SELECT TO_CHAR(started_at, 'Day') AS dia_semana, COUNT(*) AS viajes
+        SELECT TRIM(TO_CHAR(started_at, 'Day')) AS dia_semana, COUNT(*)::bigint AS viajes
         FROM {SCHEMA}.{TABLE}
         {where_sql}
         GROUP BY dia_semana
@@ -226,7 +272,7 @@ with tab_general:
     st.divider()
     st.subheader("🧓 Distribución por año de nacimiento (Top 20)")
     births = query_df(f"""
-        SELECT birth_year, COUNT(*) AS viajes
+        SELECT birth_year, COUNT(*)::bigint AS viajes
         FROM {SCHEMA}.{TABLE}
         {where_sql}
         AND birth_year IS NOT NULL
@@ -235,6 +281,7 @@ with tab_general:
         LIMIT 20;
     """, params)
     if not births.empty:
+        births = births.astype({"viajes":"int64"})
         st.bar_chart(births.set_index("birth_year")["viajes"])
     else:
         st.info("No hay datos de birth_year.")
