@@ -71,10 +71,14 @@ YEAR_NOW = datetime.utcnow().year
 def process_file(path):
     base = os.path.basename(path)
     stem = re.sub(r"\.csv$", "", base)
-    out_csv = os.path.join(CLEAN_DIR, f"{stem}__clean.csv")
     out_par = os.path.join(CLEAN_DIR, f"{stem}__clean.parquet")
+    
+    # Verificar si ya existe el archivo Parquet
+    if os.path.exists(out_par):
+        print(f"[SKIP] {base} → Ya existe {os.path.basename(out_par)}")
+        return
 
-    first_chunk = True
+    all_chunks = []
     parquet_written = False
 
     try:
@@ -148,36 +152,18 @@ def process_file(path):
                     "started_at","ended_at","bikeid","start_station_id","end_station_id"
                 ])
 
-            # salida CSV (para COPY)
-            df_csv = df.copy()
-            df_csv["started_at"] = df_csv["started_at"].dt.strftime("%Y-%m-%d %H:%M:%S")
-            df_csv["ended_at"]   = df_csv["ended_at"].dt.strftime("%Y-%m-%d %H:%M:%S")
-            df_csv.to_csv(out_csv, index=False,
-                          mode="w" if first_chunk else "a",
-                          header=first_chunk)
+            # Acumular chunk procesado
+            all_chunks.append(df)
 
-            # salida Parquet por archivo (opcional) — rápido para analytics
-            if WRITE_PARQUET:
-                # Parquet no soporta append simple en pandas; escribimos por archivo completo al finalizar chunks
-                # acumulando temporalmente en una lista pequeña es arriesgado en memoria; así que escribimos por chunk a CSV (para DB)
-                # y al terminar, juntamos con un segundo pase a partir del CSV limpio (barato y secuencial).
-                pass
-
-            first_chunk = False
-
-        # Si pediste parquet, hacemos un pase secuencial sobre el CSV limpio ya generado.
-        if WRITE_PARQUET and os.path.exists(out_csv):
-            df_all = pd.read_csv(out_csv, dtype={
-                "ride_id":"string","rideable_type":"string",
-                "start_station_id":"string","start_station_name":"string",
-                "end_station_id":"string","end_station_name":"string",
-                "member_casual":"string","bikeid":"string","usertype":"string",
-                "source_file":"string"
-            }, parse_dates=["started_at","ended_at"])
-            df_all.to_parquet(out_par, index=False)
+        # Combinar todos los chunks y guardar como Parquet
+        if all_chunks:
+            df_final = pd.concat(all_chunks, ignore_index=True)
+            
+            # Guardar directamente como Parquet
+            df_final.to_parquet(out_par, index=False)
             parquet_written = True
 
-        print(f"[OK] {base} → {os.path.basename(out_csv)}" + (" + parquet" if parquet_written else ""))
+        print(f"[OK] {base} → {os.path.basename(out_par)}")
 
     except Exception as e:
         print(f"[ERROR] {base}: {e}", file=sys.stderr)
@@ -189,7 +175,27 @@ def main():
         print(f"Sin CSV en {RAW_DIR}")
         return
     files.sort()
-    for f in files:
+    
+    # Filtrar archivos que ya tienen su versión Parquet
+    existing_parquets = set()
+    parquet_pattern = os.path.join(CLEAN_DIR, "*__clean.parquet")
+    for parquet_file in glob.glob(parquet_pattern):
+        # Extraer el nombre base (sin __clean.parquet)
+        base_name = os.path.basename(parquet_file).replace("__clean.parquet", "")
+        existing_parquets.add(base_name)
+    
+    # Filtrar archivos CSV que no tienen Parquet correspondiente
+    files_to_process = []
+    for csv_file in files:
+        base_name = os.path.basename(csv_file).replace(".csv", "")
+        if base_name not in existing_parquets:
+            files_to_process.append(csv_file)
+        else:
+            print(f"[SKIP] {os.path.basename(csv_file)} → Ya procesado (existe Parquet)")
+    
+    print(f"Procesando {len(files_to_process)} de {len(files)} archivos CSV")
+    
+    for f in files_to_process:
         process_file(f)
 
 if __name__ == "__main__":
