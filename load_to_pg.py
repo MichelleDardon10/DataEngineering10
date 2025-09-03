@@ -96,7 +96,8 @@ CREATE TABLE IF NOT EXISTS citibike.trips (
     gender SMALLINT,
     source_file TEXT,
     load_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    year_month TEXT NOT NULL
+    year_month TEXT NOT NULL,
+    UNIQUE (ride_id, started_at)
 ) PARTITION BY RANGE (started_at);
 
 CREATE TABLE IF NOT EXISTS citibike.load_metadata (
@@ -105,6 +106,7 @@ CREATE TABLE IF NOT EXISTS citibike.load_metadata (
     load_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Función mejorada que maneja el error de partición existente y agrega constraint única
 CREATE OR REPLACE FUNCTION citibike.create_trip_partition_if_not_exists(partition_date DATE)
 RETURNS VOID AS $$
 DECLARE
@@ -115,15 +117,28 @@ BEGIN
     partition_name := 'trips_' || TO_CHAR(partition_date, 'YYYY_MM');
     partition_start := DATE_TRUNC('MONTH', partition_date);
     partition_end := partition_start + INTERVAL '1 month';
+    
+    -- Verificar si la partición ya existe
     IF NOT EXISTS (
-      SELECT 1 FROM pg_class c
-      JOIN pg_namespace n ON n.oid = c.relnamespace
-      WHERE c.relkind = 'r' AND n.nspname = 'citibike' AND c.relname = partition_name
+        SELECT 1 FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relkind = 'r' AND n.nspname = 'citibike' AND c.relname = partition_name
     ) THEN
-        EXECUTE format('
-            CREATE TABLE citibike.%I PARTITION OF citibike.trips
-            FOR VALUES FROM (%L) TO (%L)
-        ', partition_name, partition_start, partition_end);
+        BEGIN
+            EXECUTE format('
+                CREATE TABLE citibike.%I PARTITION OF citibike.trips
+                FOR VALUES FROM (%L) TO (%L)
+            ', partition_name, partition_start, partition_end);
+            
+            -- Agregar constraint única a la partición recién creada
+            EXECUTE format('
+                ALTER TABLE citibike.%I ADD CONSTRAINT %I UNIQUE (ride_id)
+            ', partition_name, partition_name || '_unique_ride_id');
+            
+        EXCEPTION WHEN duplicate_table THEN
+            -- La partición ya existe, simplemente ignorar
+            RAISE NOTICE 'Partition % already exists', partition_name;
+        END;
     END IF;
 END;
 $$ LANGUAGE plpgsql;
@@ -182,7 +197,8 @@ SELECT
   s.end_station_id, s.end_station_name, s.end_lat, s.end_lng,
   s.member_casual, s.tripduration_seconds, s.bikeid, s.usertype,
   s.birth_year, s.gender, s.source_file, s.year_month
-FROM citibike.trips_staging s;
+FROM citibike.trips_staging s
+ON CONFLICT (ride_id, started_at) DO NOTHING;
 """
 
 # =========================================================
@@ -203,7 +219,6 @@ def set_perf_settings(conn):
         "SET maintenance_work_mem TO '1024MB'",
         "SET work_mem TO '256MB'",
         "SET temp_buffers TO '256MB'",
-        # "SET checkpoint_timeout TO '30min'",  # ❌ no se puede por sesión
     ]
     with conn.cursor() as cur:
         for sql in cmds:
@@ -304,19 +319,46 @@ def upsert_stations(conn, df: pd.DataFrame):
 
     frames = []
     now = datetime.now()
+    
     if "start" in cols:
         st = df[["start_station_id","start_station_name","start_lat","start_lng"]].copy()
         st.columns = ["station_id","station_name","latitude","longitude"]
-        st["first_seen"] = now; st["last_seen"] = now
+        st["first_seen"] = now
+        st["last_seen"] = now
+        # Limpieza más agresiva
+        st = st[st["station_id"].notna()]
+        st["station_id"] = st["station_id"].astype(str).str.strip()
+        st = st[st["station_id"] != ""]
+        st = st[st["station_id"] != "nan"]
         frames.append(st)
+    
     if "end" in cols:
         et = df[["end_station_id","end_station_name","end_lat","end_lng"]].copy()
         et.columns = ["station_id","station_name","latitude","longitude"]
-        et["first_seen"] = now; et["last_seen"] = now
+        et["first_seen"] = now
+        et["last_seen"] = now
+        # Limpieza más agresiva
+        et = et[et["station_id"].notna()]
+        et["station_id"] = et["station_id"].astype(str).str.strip()
+        et = et[et["station_id"] != ""]
+        et = et[et["station_id"] != "nan"]
         frames.append(et)
 
+    if not frames:
+        return
+    
     all_st = pd.concat(frames, ignore_index=True)
-    all_st = all_st.dropna(subset=["station_id"]).drop_duplicates("station_id")
+    
+    # Limpieza final exhaustiva
+    all_st = all_st[all_st["station_id"].notna()]
+    all_st["station_id"] = all_st["station_id"].astype(str).str.strip()
+    all_st = all_st[all_st["station_id"] != ""]
+    all_st = all_st[all_st["station_id"] != "nan"]
+    
+    if len(all_st) == 0:
+        return
+    
+    all_st = all_st.drop_duplicates("station_id")
 
     with conn.cursor() as cur:
         cur.execute("""
@@ -329,27 +371,35 @@ def upsert_stations(conn, df: pd.DataFrame):
               last_seen TIMESTAMP
             ) ON COMMIT DROP;
         """)
+    
     buf = StringIO()
     all_st.to_csv(buf, index=False, header=False, na_rep='')
     buf.seek(0)
-    with conn.cursor() as cur:
-        cur.copy_expert(
-            "COPY _stations_stage (station_id,station_name,latitude,longitude,first_seen,last_seen) FROM STDIN WITH (FORMAT CSV, NULL '')",
-            buf
-        )
-        cur.execute("""
-            INSERT INTO citibike.stations AS t
-            (station_id, station_name, latitude, longitude, first_seen, last_seen)
-            SELECT station_id, station_name, latitude, longitude, MIN(first_seen), MAX(last_seen)
-            FROM _stations_stage
-            GROUP BY 1,2,3,4
-            ON CONFLICT (station_id) DO UPDATE SET
-              station_name = COALESCE(EXCLUDED.station_name, t.station_name),
-              latitude     = COALESCE(EXCLUDED.latitude,     t.latitude),
-              longitude    = COALESCE(EXCLUDED.longitude,    t.longitude),
-              last_seen    = GREATEST(EXCLUDED.last_seen,    t.last_seen);
-        """)
-    conn.commit()
+    
+    try:
+        with conn.cursor() as cur:
+            cur.copy_expert(
+                "COPY _stations_stage (station_id,station_name,latitude,longitude,first_seen,last_seen) FROM STDIN WITH (FORMAT CSV, NULL '')",
+                buf
+            )
+            cur.execute("""
+                INSERT INTO citibike.stations AS t
+                (station_id, station_name, latitude, longitude, first_seen, last_seen)
+                SELECT station_id, station_name, latitude, longitude, MIN(first_seen), MAX(last_seen)
+                FROM _stations_stage
+                GROUP BY 1,2,3,4
+                ON CONFLICT (station_id) DO UPDATE SET
+                  station_name = COALESCE(EXCLUDED.station_name, t.station_name),
+                  latitude     = COALESCE(EXCLUDED.latitude,     t.latitude),
+                  longitude    = COALESCE(EXCLUDED.longitude,    t.longitude),
+                  last_seen    = GREATEST(EXCLUDED.last_seen,    t.last_seen);
+            """)
+        conn.commit()
+        print("✅ Estaciones actualizadas correctamente")
+    except Exception as e:
+        print(f"❌ Error en upsert_stations: {e}")
+        conn.rollback()
+        raise
 
 # =========================================================
 # COPY helpers
@@ -364,7 +414,17 @@ def copy_df(conn, df: pd.DataFrame, copy_sql: str):
 def precreate_partitions(conn, year_month_list):
     with conn.cursor() as cur:
         for ym in sorted(set(year_month_list)):
-            cur.execute("SELECT citibike.create_trip_partition_if_not_exists(%s)", (ym+'-01',))
+            try:
+                cur.execute("SELECT citibike.create_trip_partition_if_not_exists(%s)", (ym+'-01',))
+            except psycopg2.errors.DuplicateTable:
+                # Si la partición ya existe, simplemente continuar
+                print(f"ℹ️  La partición {ym} ya existe, continuando...")
+                conn.rollback()
+                continue
+            except Exception as e:
+                print(f"⚠️  Error al crear partición {ym}: {e}")
+                conn.rollback()
+                continue
     conn.commit()
 
 # =========================================================
@@ -375,9 +435,10 @@ def process_file_fast(file_path: str):
     dataset = ds.dataset(file_path, format="parquet")
     table = dataset.to_table()
 
-    base = os.path.basename(file_path)
+    # Usar la ruta completa como identificador único, no solo el nombre base
+    source_file_id = file_path
     start_time = datetime.now()
-    print(f"⚡ Procesando: {base}")
+    print(f"⚡ Procesando: {source_file_id}")
 
     # clave: NO Arrow-backed
     df = table.to_pandas()
@@ -386,7 +447,8 @@ def process_file_fast(file_path: str):
     try:
         set_perf_settings(conn)
 
-        df = transform(df, base)
+        # Pasar el identificador único a transform
+        df = transform(df, source_file_id)
 
         precreate_partitions(conn, df["year_month"].unique())
 
@@ -404,12 +466,12 @@ def process_file_fast(file_path: str):
                     ON CONFLICT (source_file) DO UPDATE
                     SET records_loaded = EXCLUDED.records_loaded,
                         load_date = CURRENT_TIMESTAMP
-                """, (base,))
+                """, (source_file_id,))
         elapsed = datetime.now() - start_time
-        print(f"✅ {base}: OK en {elapsed}")
+        print(f"✅ {source_file_id}: OK en {elapsed}")
     except Exception as e:
         import traceback
-        print(f"❌ Error procesando {base}: {e}")
+        print(f"❌ Error procesando {source_file_id}: {e}")
         traceback.print_exc()
         conn.rollback()
         raise
@@ -438,7 +500,8 @@ def main():
     finally:
         conn.close()
 
-    new_files = [f for f in files if os.path.basename(f) not in loaded]
+    # Usar rutas completas para la verificación
+    new_files = [f for f in files if f not in loaded]
     if not new_files:
         print("✅ Todos los archivos ya están cargados")
         return

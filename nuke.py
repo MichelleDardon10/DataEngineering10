@@ -52,7 +52,7 @@ def nuke_database():
         conn.autocommit = True
         
         with conn.cursor() as cur:
-            # SQL completo con todas las 19 columnas
+            # SQL completo con todas las 19 columnas Y LA RESTRICCIÓN UNIQUE
             create_sql = """
             CREATE SCHEMA IF NOT EXISTS citibike;
 
@@ -66,7 +66,7 @@ def nuke_database():
                 last_seen TIMESTAMP
             );
 
-            -- Tabla principal particionada - ESTRUCTURA COMPLETA (19 columnas)
+            -- Tabla principal particionada - ESTRUCTURA COMPLETA (19 columnas) CON UNIQUE CONSTRAINT
             CREATE TABLE IF NOT EXISTS citibike.trips (
                 ride_id TEXT NOT NULL,
                 rideable_type TEXT,
@@ -88,7 +88,8 @@ def nuke_database():
                 gender SMALLINT,
                 source_file TEXT,
                 load_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                year_month TEXT NOT NULL
+                year_month TEXT NOT NULL,
+                UNIQUE (ride_id, started_at)  -- ← AÑADIR ESTA LÍNEA CRUCIAL
             ) PARTITION BY RANGE (started_at);
 
             -- Tabla de metadata simplificada
@@ -98,7 +99,30 @@ def nuke_database():
                 load_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
 
-            -- Función para crear particiones
+            -- Tabla de staging para carga rápida
+            CREATE UNLOGGED TABLE IF NOT EXISTS citibike.trips_staging (
+                rideable_type TEXT,
+                started_at TIMESTAMP,
+                ended_at TIMESTAMP,
+                start_station_id TEXT,
+                start_station_name TEXT,
+                start_lat FLOAT4,
+                start_lng FLOAT4,
+                end_station_id TEXT,
+                end_station_name TEXT,
+                end_lat FLOAT4,
+                end_lng FLOAT4,
+                member_casual TEXT,
+                tripduration_seconds INTEGER,
+                bikeid TEXT,
+                usertype TEXT,
+                birth_year SMALLINT,
+                gender SMALLINT,
+                source_file TEXT,
+                year_month TEXT
+            );
+
+            -- Función para crear particiones CON RESTRICCIÓN UNIQUE
             CREATE OR REPLACE FUNCTION citibike.create_trip_partition_if_not_exists(partition_date DATE)
             RETURNS VOID AS $$
             DECLARE
@@ -115,6 +139,11 @@ def nuke_database():
                         CREATE TABLE citibike.%I PARTITION OF citibike.trips
                         FOR VALUES FROM (%L) TO (%L)
                     ', partition_name, partition_start, partition_end);
+                    
+                    -- Agregar constraint única a la partición
+                    EXECUTE format('
+                        ALTER TABLE citibike.%I ADD CONSTRAINT %I UNIQUE (ride_id)
+                    ', partition_name, partition_name || '_unique_ride_id');
                 END IF;
             END;
             $$ LANGUAGE plpgsql;
@@ -192,7 +221,22 @@ def verify_structure():
                 for col in extra_in_db:
                     print(f"   - {col}")
             
-            if not missing_in_db and not extra_in_db:
+            # Verificar también la restricción única
+            cur.execute("""
+                SELECT conname, contype 
+                FROM pg_constraint 
+                JOIN pg_class ON conrelid = pg_class.oid 
+                JOIN pg_namespace ON pg_class.relnamespace = pg_namespace.oid 
+                WHERE nspname = 'citibike' AND relname = 'trips' AND contype = 'u'
+            """)
+            
+            unique_constraints = cur.fetchall()
+            if unique_constraints:
+                print("✅ Restricción única encontrada en la tabla trips")
+            else:
+                print("❌ NO se encontró restricción única en la tabla trips")
+            
+            if not missing_in_db and not extra_in_db and unique_constraints:
                 print("✅ Todas las columnas coinciden perfectamente!")
                 return True
             else:
