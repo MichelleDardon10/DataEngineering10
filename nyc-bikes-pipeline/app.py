@@ -3,7 +3,7 @@ from pydantic import BaseModel, Field, conint, constr
 from datetime import datetime, timezone
 import boto3, json, os
 
-app = FastAPI(title="NYC Bikes Ingestion")
+app = FastAPI(title="NYC Bikes Ingestion")x
 
 #validacion de JSON
 class TripEvent(BaseModel):

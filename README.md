@@ -1,9 +1,4 @@
 # DataEngineering10
-Repo made to develop Data Engineering projects 
-
-### 1 DownloadFiles
-
-### 2 Extraer
-
-### 3 Clean
-
+pip install fastapi uvicorn boto3 --break-system-packages
+pip install psycopg2-binary --break-system-packages
+pip install streamlit --break-system-packages
