@@ -19,7 +19,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # LocalStack for local SQS/S3 development (or use real AWS)
+  # LocalStack for local SQS/S3 development
   localstack:
     image: localstack/localstack:latest
     environment:
@@ -36,31 +36,25 @@ services:
   api:
     build: .
     ports:
-      - "8000:8000"
+      - "8082:8082"
     environment:
       DB_HOST: db
       DB_PORT: 5432
       DB_NAME: nyc_bikes
       DB_USER: bikes_user
       DB_PASSWORD: bikes_pass
-      # For local development with LocalStack:
       AWS_ENDPOINT_URL: http://localstack:4566
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
       SQS_QUEUE_URL: http://localstack:4566/000000000000/bike-trips
-      # For production with real AWS (uncomment and set):
-      # AWS_ENDPOINT_URL: ""  # Empty for real AWS
-      # AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      # AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      # AWS_DEFAULT_REGION: us-east-1
-      # SQS_QUEUE_URL: https://sqs.us-east-1.amazonaws.com/YOUR_ACCOUNT/bike-trips
       BRONZE_BUCKET: city-data-25
     depends_on:
       db:
         condition: service_healthy
       localstack:
         condition: service_started
-    command: uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn app:app --host 0.0.0.0 --port 8082 --reload
 
   # Worker for processing messages from queue
   worker:
@@ -74,6 +68,7 @@ services:
       AWS_ENDPOINT_URL: http://localstack:4566
       AWS_ACCESS_KEY_ID: test
       AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
       SQS_QUEUE_URL: http://localstack:4566/000000000000/bike-trips
       BRONZE_BUCKET: city-data-25
     depends_on:
@@ -83,7 +78,7 @@ services:
         condition: service_started
     command: python worker.py
     deploy:
-      replicas: 2  # Scale workers as needed
+      replicas: 2
 
   # Streamlit dashboard
   dashboard:

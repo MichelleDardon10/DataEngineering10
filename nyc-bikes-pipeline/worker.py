@@ -1,0 +1,218 @@
+import boto3
+import json
+import os
+import psycopg2
+from psycopg2.pool import ThreadedConnectionPool
+from datetime import datetime, timezone
+import time
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Initialize AWS clients
+sqs = boto3.client(
+    "sqs",
+    endpoint_url=os.getenv("AWS_ENDPOINT_URL"),
+    region_name=os.getenv("AWS_DEFAULT_REGION", "us-east-1")
+)
+s3 = boto3.client(
+    "s3",
+    endpoint_url=os.getenv("AWS_ENDPOINT_URL"),
+    region_name=os.getenv("AWS_DEFAULT_REGION", "us-east-1")
+)
+
+QUEUE_URL = os.getenv("SQS_QUEUE_URL")
+BRONZE_BUCKET = os.getenv("BRONZE_BUCKET", "city-data-25")
+BRONZE_PREFIX = "bronze/trips/"
+
+# Database connection pool
+db_pool = ThreadedConnectionPool(
+    minconn=1,
+    maxconn=5,
+    host=os.getenv("DB_HOST"),
+    port=os.getenv("DB_PORT"),
+    database=os.getenv("DB_NAME"),
+    user=os.getenv("DB_USER"),
+    password=os.getenv("DB_PASSWORD")
+)
+
+def validate_trip_quality(trip: dict) -> dict:
+    """
+    Validate trip data and return quality score.
+    Returns: {score: float, issues: list, is_valid: bool}
+    """
+    issues = []
+    score = 100.0
+    
+    # Check 1: Duration consistency
+    start = datetime.fromisoformat(trip["start_time"].replace("Z", "+00:00"))
+    end = datetime.fromisoformat(trip["end_time"].replace("Z", "+00:00"))
+    actual_duration = (end - start).total_seconds()
+    
+    if abs(actual_duration - trip["trip_duration"]) > 60:  # 1 minute tolerance
+        issues.append("duration_mismatch")
+        score -= 20
+    
+    # Check 2: End time after start time
+    if end <= start:
+        issues.append("invalid_time_sequence")
+        score -= 30
+    
+    # Check 3: Reasonable duration (< 24 hours)
+    if trip["trip_duration"] > 86400:
+        issues.append("excessive_duration")
+        score -= 15
+    
+    # Check 4: Reasonable age
+    if trip["rider_age"] < 16 or trip["rider_age"] > 100:
+        issues.append("suspicious_age")
+        score -= 10
+    
+    # Check 5: Same station trips (suspicious)
+    if trip["start_station_id"] == trip["end_station_id"] and trip["trip_duration"] < 300:
+        issues.append("same_station_short_trip")
+        score -= 5
+    
+    # Check 6: Valid bike type
+    valid_types = ["electric", "classic", "docked"]
+    if trip["bike_type"].lower() not in valid_types:
+        issues.append("invalid_bike_type")
+        score -= 25
+    
+    return {
+        "score": max(0, score),
+        "issues": issues,
+        "is_valid": score >= 50  # Threshold for "valid" data
+    }
+
+def persist_to_bronze(trip: dict, quality: dict):
+    """Write trip to S3 bronze layer with quality metadata"""
+    try:
+        now = datetime.now(timezone.utc)
+        date = now.strftime("%Y-%m-%d")
+        hour = now.strftime("%H")
+        
+        # Add quality metadata
+        trip["quality_score"] = quality["score"]
+        trip["quality_issues"] = quality["issues"]
+        trip["is_valid"] = quality["is_valid"]
+        trip["processed_at"] = now.isoformat()
+        
+        key = f"{BRONZE_PREFIX}date={date}/hour={hour}/{trip['trip_id']}.json"
+        
+        s3.put_object(
+            Bucket=BRONZE_BUCKET,
+            Key=key,
+            Body=json.dumps(trip, default=str),
+            ContentType="application/json"
+        )
+        
+        logger.info(f"Persisted trip {trip['trip_id']} to S3 with quality score {quality['score']}")
+        return True
+    
+    except Exception as e:
+        logger.error(f"Failed to persist to S3: {e}")
+        return False
+
+def log_to_database(trip: dict, quality: dict):
+    """Log trip metadata and quality to PostgreSQL"""
+    conn = db_pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO trip_metadata (
+                    trip_id, bike_id, start_time, end_time,
+                    start_station_id, end_station_id, rider_age,
+                    trip_duration, bike_type, quality_score,
+                    quality_issues, is_valid, ingested_at, processed_at
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                ON CONFLICT (trip_id) DO UPDATE SET
+                    quality_score = EXCLUDED.quality_score,
+                    quality_issues = EXCLUDED.quality_issues,
+                    processed_at = EXCLUDED.processed_at
+            """, (
+                trip["trip_id"],
+                trip["bike_id"],
+                trip["start_time"],
+                trip["end_time"],
+                trip["start_station_id"],
+                trip["end_station_id"],
+                trip["rider_age"],
+                trip["trip_duration"],
+                trip["bike_type"],
+                quality["score"],
+                json.dumps(quality["issues"]),
+                quality["is_valid"],
+                trip.get("ingested_at"),
+                datetime.now(timezone.utc)
+            ))
+        conn.commit()
+        logger.info(f"Logged trip {trip['trip_id']} to database")
+    except Exception as e:
+        logger.error(f"Database error: {e}")
+        conn.rollback()
+    finally:
+        db_pool.putconn(conn)
+
+def process_message(message):
+    """Process a single SQS message"""
+    try:
+        trip = json.loads(message["Body"])
+        
+        # Validate and score quality
+        quality = validate_trip_quality(trip)
+        
+        # Persist to bronze layer
+        s3_success = persist_to_bronze(trip, quality)
+        
+        # Log metadata to database
+        if s3_success:
+            log_to_database(trip, quality)
+        
+        # Delete message from queue (only if successful)
+        if s3_success:
+            sqs.delete_message(
+                QueueUrl=QUEUE_URL,
+                ReceiptHandle=message["ReceiptHandle"]
+            )
+            logger.info(f"Successfully processed trip {trip['trip_id']}")
+        else:
+            # Message will become visible again for retry
+            logger.warning(f"Failed to process trip {trip['trip_id']}, will retry")
+    
+    except Exception as e:
+        logger.error(f"Error processing message: {e}")
+        # Don't delete message - it will be retried
+
+def main():
+    """Main worker loop"""
+    logger.info("Worker started, polling for messages...")
+    
+    while True:
+        try:
+            # Long polling (20 seconds)
+            response = sqs.receive_message(
+                QueueUrl=QUEUE_URL,
+                MaxNumberOfMessages=10,
+                WaitTimeSeconds=20,
+                VisibilityTimeout=60  # 60 seconds to process
+            )
+            
+            messages = response.get("Messages", [])
+            
+            if messages:
+                logger.info(f"Received {len(messages)} messages")
+                for message in messages:
+                    process_message(message)
+            else:
+                logger.debug("No messages, waiting...")
+        
+        except Exception as e:
+            logger.error(f"Worker error: {e}")
+            time.sleep(5)  # Brief pause before retrying
+
+if __name__ == "__main__":
+    main()
