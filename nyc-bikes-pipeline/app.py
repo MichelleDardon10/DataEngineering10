@@ -27,15 +27,16 @@ app = FastAPI(
 
 # Validation schema
 class TripEvent(BaseModel):
-    trip_id: constr(strip_whitespace=True, min_length=1)
-    bike_id: conint(ge=1)
-    start_time: datetime
-    end_time: datetime
-    start_station_id: conint(ge=1)
-    end_station_id: conint(ge=1)
-    rider_age: conint(ge=0, le=120)
-    trip_duration: conint(ge=0)
-    bike_type: constr(strip_whitespace=True)
+    trip_id: str
+    bike_id: Union[int, float, str]  # Acepta int, float o string
+    start_time: Union[datetime, str]  # Acepta datetime o string
+    end_time: Union[datetime, str]
+    start_station_id: Union[int, float, str]  # Acepta cualquier tipo
+    end_station_id: Union[int, float, str]
+    rider_age: Optional[Union[int, float, str]] = 0  # Opcional, default 0
+    trip_duration: Union[int, float, str]
+    bike_type: str
+    member_casual: Optional[str] = "casual" 
 
     class Config:
         json_schema_extra = {
@@ -52,11 +53,11 @@ class TripEvent(BaseModel):
             }
         }
 
-@app.post("/api/v1/trips", status_code=202)
+@app.post("/api/v1/trips", status_code=200)
 async def ingest_trip(event: TripEvent, request: Request):
     """
     Ingest a bike trip event.
-    Returns 202 Accepted immediately after queuing.
+    Returns 200 Accepted immediately after queuing.
     """
     evt = event.model_dump()
     

@@ -81,7 +81,7 @@ def send_trip(trip: dict) -> tuple[bool, float, str]:
         response = requests.post(API_URL, json=trip, timeout=5)
         elapsed = time.time() - start
         
-        if response.status_code == 202:
+        if response.status_code == 200:
             return True, elapsed, trip["trip_id"]
         else:
             return False, elapsed, f"Error {response.status_code}: {response.text}"
