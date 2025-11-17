@@ -24,7 +24,7 @@ def generate_trip(trip_num: int) -> dict:
         # Bad data scenarios
         scenario = random.choice([
             "duration_mismatch",
-            "invalid_time",
+            "invalid_time", 
             "excessive_duration",
             "suspicious_age",
             "same_station"
@@ -46,7 +46,8 @@ def generate_trip(trip_num: int) -> dict:
                 "end_station_id": random.choice(STATIONS),
                 "rider_age": random.choice([5, 150]),  # Invalid age
                 "trip_duration": duration,
-                "bike_type": random.choice(BIKE_TYPES)
+                "bike_type": random.choice(BIKE_TYPES),
+                "member_casual": random.choice(["member", "casual"])  # NUEVO CAMPO
             }
         elif scenario == "same_station":
             station = random.choice(STATIONS)
@@ -59,7 +60,8 @@ def generate_trip(trip_num: int) -> dict:
                 "end_station_id": station,  # Same station
                 "rider_age": random.randint(16, 75),
                 "trip_duration": 120,  # Short trip
-                "bike_type": random.choice(BIKE_TYPES)
+                "bike_type": random.choice(BIKE_TYPES),
+                "member_casual": random.choice(["member", "casual"])  # NUEVO CAMPO
             }
     
     return {
@@ -71,7 +73,8 @@ def generate_trip(trip_num: int) -> dict:
         "end_station_id": random.choice(STATIONS),
         "rider_age": random.randint(16, 75),
         "trip_duration": duration,
-        "bike_type": random.choice(BIKE_TYPES)
+        "bike_type": random.choice(BIKE_TYPES),
+        "member_casual": random.choice(["member", "casual"])  # NUEVO CAMPO
     }
 
 def send_trip(trip: dict) -> tuple[bool, float, str]:
@@ -98,10 +101,10 @@ def test_single_trip():
     success, elapsed, result = send_trip(trip)
     
     if success:
-        print(f"✅ Success! Response time: {elapsed*1000:.2f}ms")
+        print(f" Success! Response time: {elapsed*1000:.2f}ms")
         print(f"Trip ID: {result}")
     else:
-        print(f"❌ Failed: {result}")
+        print(f" Failed: {result}")
         print(f"Response time: {elapsed*1000:.2f}ms")
 
 def load_test(num_trips: int = 100, concurrency: int = 10):
@@ -124,7 +127,7 @@ def load_test(num_trips: int = 100, concurrency: int = 10):
                 results["success"] += 1
             else:
                 results["failed"] += 1
-                print(f"❌ Failed: {result}")
+                print(f" Failed: {result}")
     
     total_time = time.time() - start_time
     
@@ -135,13 +138,13 @@ def load_test(num_trips: int = 100, concurrency: int = 10):
     max_time = max(times) if times else 0
     throughput = num_trips / total_time
     
-    print(f"\n📊 Results:")
+    print(f"\n Results:")
     print(f"  Total trips: {num_trips}")
     print(f"  Successful: {results['success']} ({results['success']/num_trips*100:.1f}%)")
     print(f"  Failed: {results['failed']} ({results['failed']/num_trips*100:.1f}%)")
     print(f"  Total time: {total_time:.2f}s")
     print(f"  Throughput: {throughput:.2f} trips/sec")
-    print(f"\n⏱️  Response Times:")
+    print(f"\n  Response Times:")
     print(f"  Average: {avg_time*1000:.2f}ms")
     print(f"  Min: {min_time*1000:.2f}ms")
     print(f"  Max: {max_time*1000:.2f}ms")
@@ -187,7 +190,7 @@ def stress_test(duration_seconds: int = 60, trips_per_second: int = 100):
     total_time = time.time() - start_time
     actual_throughput = trip_num / total_time
     
-    print(f"\n📊 Stress Test Results:")
+    print(f"\n Stress Test Results:")
     print(f"  Total trips sent: {trip_num}")
     print(f"  Successful: {results['success']} ({results['success']/trip_num*100:.1f}%)")
     print(f"  Failed: {results['failed']} ({results['failed']/trip_num*100:.1f}%)")

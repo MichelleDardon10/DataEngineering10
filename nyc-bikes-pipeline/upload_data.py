@@ -61,8 +61,8 @@ def main():
         key = str(path.relative_to(DATA_DIR)).replace("\\", "/")
         log.info(f"({idx}/{len(files)}) Processing: {path.name} → {key}")
         upload_one(path, key)
-        delete_local(path)   # ⬅️ only after delete we continue to the next
-    log.info("✅ Finished: all files uploaded and removed locally.")
+        delete_local(path) 
+    log.info(" Finished: all files uploaded and removed locally.")
 
 if __name__ == "__main__":
     main()

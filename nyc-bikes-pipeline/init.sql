@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS trip_metadata (
     rider_age INTEGER NOT NULL,
     trip_duration INTEGER NOT NULL,
     bike_type VARCHAR(50) NOT NULL,
+    member_casual VARCHAR(10) DEFAULT 'casual',
     quality_score DECIMAL(5,2) NOT NULL,
     quality_issues JSONB,
     is_valid BOOLEAN NOT NULL,
@@ -20,12 +21,24 @@ CREATE TABLE IF NOT EXISTS trip_metadata (
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS alerts (
+    id SERIAL PRIMARY KEY,
+    level VARCHAR(20) NOT NULL,
+    type VARCHAR(50) NOT NULL,
+    message TEXT NOT NULL,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+
 -- Indexes for common queries
 CREATE INDEX idx_trip_start_time ON trip_metadata(start_time);
 CREATE INDEX idx_trip_quality_score ON trip_metadata(quality_score);
 CREATE INDEX idx_trip_is_valid ON trip_metadata(is_valid);
 CREATE INDEX idx_trip_bike_type ON trip_metadata(bike_type);
 CREATE INDEX idx_trip_processed_at ON trip_metadata(processed_at);
+CREATE INDEX IF NOT EXISTS idx_trip_metadata_ingested_at ON trip_metadata(ingested_at);
+CREATE INDEX IF NOT EXISTS idx_trip_metadata_quality_band ON trip_metadata(quality_band);
+CREATE INDEX IF NOT EXISTS idx_trip_metadata_processed_at ON trip_metadata(processed_at);
 
 -- Quality summary view
 CREATE OR REPLACE VIEW quality_summary AS

@@ -45,29 +45,88 @@ def validate_trip_quality(trip: dict) -> dict:
     issues = []
     score = 100.0
     
-    # Check 1: Duration consistency
-    start = datetime.fromisoformat(trip["start_time"].replace("Z", "+00:00"))
-    end = datetime.fromisoformat(trip["end_time"].replace("Z", "+00:00"))
-    actual_duration = (end - start).total_seconds()
+    # CONVERTIR TIPOS FLEXIBLES A LOS ESPERADOS
+    try:
+        # Convertir bike_id a int
+        try:
+            trip["bike_id"] = int(float(trip["bike_id"]))
+        except (ValueError, TypeError):
+            issues.append("invalid_bike_id")
+            score -= 10
+        
+        # Convertir station_ids a int
+        try:
+            trip["start_station_id"] = int(float(trip["start_station_id"]))
+        except (ValueError, TypeError):
+            issues.append("invalid_start_station")
+            score -= 10
+            
+        try:
+            trip["end_station_id"] = int(float(trip["end_station_id"]))
+        except (ValueError, TypeError):
+            issues.append("invalid_end_station") 
+            score -= 10
+        
+        # Convertir rider_age a int (si existe)
+        if "rider_age" in trip and trip["rider_age"] not in [None, ""]:
+            try:
+                trip["rider_age"] = int(float(trip["rider_age"]))
+            except (ValueError, TypeError):
+                issues.append("invalid_rider_age")
+                score -= 10
+        else:
+            trip["rider_age"] = 0  # Default value
+        
+        # Convertir trip_duration a int
+        try:
+            trip["trip_duration"] = int(float(trip["trip_duration"]))
+        except (ValueError, TypeError):
+            issues.append("invalid_trip_duration")
+            score -= 10
+        
+        # Validar member_casual (nuevo campo)
+        if "member_casual" in trip and trip["member_casual"] not in [None, ""]:
+            if trip["member_casual"].lower() not in ["member", "casual"]:
+                issues.append("invalid_member_type")
+                score -= 5
+        else:
+            trip["member_casual"] = "casual"  # Default value
     
-    if abs(actual_duration - trip["trip_duration"]) > 60:  # 1 minute tolerance
-        issues.append("duration_mismatch")
+    except Exception as e:
+        issues.append("type_conversion_error")
         score -= 20
     
+    # Check 1: Duration consistency (con tipos ya convertidos)
+    try:
+        start = datetime.fromisoformat(trip["start_time"].replace("Z", "+00:00"))
+        end = datetime.fromisoformat(trip["end_time"].replace("Z", "+00:00"))
+        actual_duration = (end - start).total_seconds()
+        
+        if abs(actual_duration - trip["trip_duration"]) > 60:  # 1 minute tolerance
+            issues.append("duration_mismatch")
+            score -= 20
+    except Exception as e:
+        issues.append("time_parsing_error")
+        score -= 25
+    
     # Check 2: End time after start time
-    if end <= start:
-        issues.append("invalid_time_sequence")
-        score -= 30
+    try:
+        if end <= start:
+            issues.append("invalid_time_sequence")
+            score -= 30
+    except:
+        pass  # Ya se restó puntos arriba
     
     # Check 3: Reasonable duration (< 24 hours)
     if trip["trip_duration"] > 86400:
         issues.append("excessive_duration")
         score -= 15
     
-    # Check 4: Reasonable age
-    if trip["rider_age"] < 16 or trip["rider_age"] > 100:
-        issues.append("suspicious_age")
-        score -= 10
+    # Check 4: Reasonable age (solo si age > 0)
+    if trip["rider_age"] > 0:  # Solo validar si tiene edad
+        if trip["rider_age"] < 16 or trip["rider_age"] > 100:
+            issues.append("suspicious_age")
+            score -= 10
     
     # Check 5: Same station trips (suspicious)
     if trip["start_station_id"] == trip["end_station_id"] and trip["trip_duration"] < 300:
@@ -124,10 +183,10 @@ def log_to_database(trip: dict, quality: dict):
                 INSERT INTO trip_metadata (
                     trip_id, bike_id, start_time, end_time,
                     start_station_id, end_station_id, rider_age,
-                    trip_duration, bike_type, quality_score,
+                    trip_duration, bike_type, member_casual, quality_score,
                     quality_issues, is_valid, ingested_at, processed_at
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 ON CONFLICT (trip_id) DO UPDATE SET
                     quality_score = EXCLUDED.quality_score,
@@ -143,6 +202,7 @@ def log_to_database(trip: dict, quality: dict):
                 trip["rider_age"],
                 trip["trip_duration"],
                 trip["bike_type"],
+                trip.get("member_casual", "casual"),  # NUEVO CAMPO
                 quality["score"],
                 json.dumps(quality["issues"]),
                 quality["is_valid"],
