@@ -1,1 +1,1 @@
-{"s3": {"status": "healthy", "bucket": "city-data-25"}, "postgresql": {"status": "healthy", "trip_count": 0}, "sqs": {"status": "healthy", "message_count": 0}}
+{"api": {"status": "healthy", "service": "ingestion-api", "response_time_ms": 5039.607}, "s3": {"status": "healthy", "bucket": "city-data-25"}, "postgresql": {"status": "healthy", "trip_count": 0}, "sqs": {"status": "healthy", "message_count": 0}}

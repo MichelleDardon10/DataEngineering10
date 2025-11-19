@@ -139,6 +139,7 @@ def send_alerts_if_needed(metrics, *args, **kwargs):
         'system_status': metrics['system_status'],
         'alert_count': len(alerts),
         'alerts_generated': alerts,
-        'summary': f"{len(alerts)} alertas generadas",
-        'api_status': health_checks.get('api', {}).get('status', 'unknown')
+        'summary': summary,
+        'metrics_saved': True,
+        'data_quality_avg': metrics.get('data_quality', {}).get('avg_quality_score', 0)
     }

@@ -10,12 +10,12 @@ blocks:
   language: python
   name: check_system_health
   retry_config: null
-  status: executed
+  status: updated
   timeout: null
   type: data_loader
   upstream_blocks: []
   uuid: check_system_health
-- all_upstream_blocks_executed: false
+- all_upstream_blocks_executed: true
   color: null
   configuration: {}
   downstream_blocks:
@@ -32,7 +32,7 @@ blocks:
   upstream_blocks:
   - check_system_health
   uuid: generate_observability_metrics
-- all_upstream_blocks_executed: false
+- all_upstream_blocks_executed: true
   color: null
   configuration: {}
   downstream_blocks: []
@@ -42,7 +42,7 @@ blocks:
   language: python
   name: send_alerts_if_needed
   retry_config: null
-  status: updated
+  status: executed
   timeout: null
   type: data_exporter
   upstream_blocks:
