@@ -18,6 +18,7 @@ docker-compose ps
 ```bash
 # Check API
 curl http://localhost:8082/health
+curl.exe http://localhost:8082/health
 
 # Send test trip
 python3 test-client.py single

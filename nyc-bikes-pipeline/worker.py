@@ -6,6 +6,8 @@ from psycopg2.pool import ThreadedConnectionPool
 from datetime import datetime, timezone
 import time
 import logging
+import threading
+from collections import defaultdict
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -24,7 +26,13 @@ s3 = boto3.client(
 
 QUEUE_URL = os.getenv("SQS_QUEUE_URL")
 BRONZE_BUCKET = os.getenv("BRONZE_BUCKET", "city-data-25")
-BRONZE_PREFIX = "bronze/trips/"
+
+# Batch configuration
+BATCH_SIZE = 1
+BATCH_TIMEOUT = 5
+batch_buffer = defaultdict(list)  # {(year, month): [trips]}
+batch_lock = threading.Lock()
+last_flush_time = {}  # {(year, month): timestamp}
 
 # Database connection pool
 db_pool = ThreadedConnectionPool(
@@ -146,33 +154,81 @@ def validate_trip_quality(trip: dict) -> dict:
     }
 
 def persist_to_bronze(trip: dict, quality: dict):
-    """Write trip to S3 bronze layer with quality metadata"""
+    """Add trip to batch buffer for bronze layer persistence"""
     try:
-        now = datetime.now(timezone.utc)
-        date = now.strftime("%Y-%m-%d")
-        hour = now.strftime("%H")
+        # Extraer año/mes del start_time del trip
+        start_time = datetime.fromisoformat(trip["start_time"].replace("Z", "+00:00"))
+        year = start_time.strftime("%Y")
+        month = start_time.strftime("%m")
         
         # Add quality metadata
         trip["quality_score"] = quality["score"]
         trip["quality_issues"] = quality["issues"]
         trip["is_valid"] = quality["is_valid"]
-        trip["processed_at"] = now.isoformat()
+        trip["processed_at"] = datetime.now(timezone.utc).isoformat()
         
-        key = f"{BRONZE_PREFIX}date={date}/hour={hour}/{trip['trip_id']}.json"
+        # Add to batch buffer
+        partition_key = (year, month)
         
-        s3.put_object(
-            Bucket=BRONZE_BUCKET,
-            Key=key,
-            Body=json.dumps(trip, default=str),
-            ContentType="application/json"
-        )
+        with batch_lock:
+            batch_buffer[partition_key].append(trip)
+            
+            # Initialize flush time if needed
+            if partition_key not in last_flush_time:
+                last_flush_time[partition_key] = time.time()
+            
+            # Check if we need to flush this partition
+            should_flush = (
+                len(batch_buffer[partition_key]) >= BATCH_SIZE or
+                (time.time() - last_flush_time[partition_key]) >= BATCH_TIMEOUT
+            )
+            
+            if should_flush:
+                flush_batch(partition_key)
         
-        logger.info(f"Persisted trip {trip['trip_id']} to S3 with quality score {quality['score']}")
         return True
     
     except Exception as e:
-        logger.error(f"Failed to persist to S3: {e}")
+        logger.error(f"Failed to add trip to batch: {e}")
         return False
+
+def flush_batch(partition_key):
+    """Flush a batch of trips to S3 (must be called with batch_lock held)"""
+    try:
+        year, month = partition_key
+        trips = batch_buffer[partition_key]
+        
+        if not trips:
+            return
+        
+        # Generate unique batch filename with timestamp
+        timestamp = int(time.time() * 1000)  # milliseconds
+        key = f"bronce/year={year}/month={month}/trip_{timestamp}.json"
+        
+        # Write batch to S3
+        s3.put_object(
+            Bucket=BRONZE_BUCKET,
+            Key=key,
+            Body=json.dumps(trips, default=str),
+            ContentType="application/json"
+        )
+        
+        logger.info(f"Flushed batch of {len(trips)} trips to {key}")
+        
+        # Clear buffer and update flush time
+        batch_buffer[partition_key] = []
+        last_flush_time[partition_key] = time.time()
+        
+    except Exception as e:
+        logger.error(f"Failed to flush batch: {e}")
+        raise
+
+def flush_all_batches():
+    """Flush all pending batches (called on shutdown or periodically)"""
+    with batch_lock:
+        for partition_key in list(batch_buffer.keys()):
+            if batch_buffer[partition_key]:
+                flush_batch(partition_key)
 
 def log_to_database(trip: dict, quality: dict):
     """Log trip metadata and quality to PostgreSQL"""
@@ -202,7 +258,7 @@ def log_to_database(trip: dict, quality: dict):
                 trip["rider_age"],
                 trip["trip_duration"],
                 trip["bike_type"],
-                trip.get("member_casual", "casual"),  # NUEVO CAMPO
+                trip.get("member_casual", "casual"),
                 quality["score"],
                 json.dumps(quality["issues"]),
                 quality["is_valid"],
@@ -225,7 +281,7 @@ def process_message(message):
         # Validate and score quality
         quality = validate_trip_quality(trip)
         
-        # Persist to bronze layer
+        # Persist to bronze layer (adds to batch)
         s3_success = persist_to_bronze(trip, quality)
         
         # Log metadata to database
@@ -250,29 +306,41 @@ def process_message(message):
 def main():
     """Main worker loop"""
     logger.info("Worker started, polling for messages...")
+    last_periodic_flush = time.time()
     
-    while True:
-        try:
-            # Long polling (20 seconds)
-            response = sqs.receive_message(
-                QueueUrl=QUEUE_URL,
-                MaxNumberOfMessages=10,
-                WaitTimeSeconds=20,
-                VisibilityTimeout=60  # 60 seconds to process
-            )
+    try:
+        while True:
+            try:
+                # Long polling (20 seconds)
+                response = sqs.receive_message(
+                    QueueUrl=QUEUE_URL,
+                    MaxNumberOfMessages=10,
+                    WaitTimeSeconds=20,
+                    VisibilityTimeout=60  # 60 seconds to process
+                )
+                
+                messages = response.get("Messages", [])
+                
+                if messages:
+                    logger.info(f"Received {len(messages)} messages")
+                    for message in messages:
+                        process_message(message)
+                else:
+                    logger.debug("No messages, waiting...")
+                
+                # Periodic flush every 30 seconds
+                if time.time() - last_periodic_flush >= 30:
+                    flush_all_batches()
+                    last_periodic_flush = time.time()
             
-            messages = response.get("Messages", [])
-            
-            if messages:
-                logger.info(f"Received {len(messages)} messages")
-                for message in messages:
-                    process_message(message)
-            else:
-                logger.debug("No messages, waiting...")
-        
-        except Exception as e:
-            logger.error(f"Worker error: {e}")
-            time.sleep(5)  # Brief pause before retrying
+            except Exception as e:
+                logger.error(f"Worker error: {e}")
+                time.sleep(5)  # Brief pause before retrying
+    
+    finally:
+        # Flush any remaining batches on shutdown
+        logger.info("Shutting down, flushing remaining batches...")
+        flush_all_batches()
 
 if __name__ == "__main__":
     main()

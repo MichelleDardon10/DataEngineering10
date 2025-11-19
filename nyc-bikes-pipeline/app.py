@@ -7,7 +7,6 @@ import json
 import os
 from contextlib import asynccontextmanager
 
-# Lifespan context manager for startup/shutdown
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: initialize connections
@@ -18,7 +17,7 @@ async def lifespan(app: FastAPI):
     )
     app.state.queue_url = os.getenv("SQS_QUEUE_URL")
     yield
-    # Shutdown: cleanup if needed
+    
 
 app = FastAPI(
     title="NYC Bikes Ingestion API",
@@ -26,15 +25,15 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Validation schema
+
 class TripEvent(BaseModel):
     trip_id: str
-    bike_id: Union[int, float, str]  # Acepta int, float o string
-    start_time: Union[datetime, str]  # Acepta datetime o string
+    bike_id: Union[int, float, str]  
+    start_time: Union[datetime, str]  
     end_time: Union[datetime, str]
-    start_station_id: Union[int, float, str]  # Acepta cualquier tipo
+    start_station_id: Union[int, float, str]  
     end_station_id: Union[int, float, str]
-    rider_age: Optional[Union[int, float, str]] = 0  # Opcional, default 0
+    rider_age: Optional[Union[int, float, str]] = 0  
     trip_duration: Union[int, float, str]
     bike_type: str
     member_casual: Optional[str] = "casual" 
@@ -62,12 +61,12 @@ async def ingest_trip(event: TripEvent, request: Request):
     """
     evt = event.model_dump()
     
-    # Add metadata
+    
     evt["ingested_at"] = datetime.now(timezone.utc).isoformat()
     evt["source_ip"] = request.client.host
     
     try:
-        # Send to SQS - this is fast and reliable
+        
         response = app.state.sqs.send_message(
             QueueUrl=app.state.queue_url,
             MessageBody=json.dumps(evt, default=str),
