@@ -1,0 +1,74 @@
+blocks:
+- all_upstream_blocks_executed: true
+  color: null
+  configuration: {}
+  downstream_blocks:
+  - generate_observability_metrics
+  executor_config: null
+  executor_type: local_python
+  has_callback: false
+  language: python
+  name: check_system_health
+  retry_config: null
+  status: executed
+  timeout: null
+  type: data_loader
+  upstream_blocks: []
+  uuid: check_system_health
+- all_upstream_blocks_executed: false
+  color: null
+  configuration: {}
+  downstream_blocks:
+  - send_alerts_if_needed
+  executor_config: null
+  executor_type: local_python
+  has_callback: false
+  language: python
+  name: generate_observability_metrics
+  retry_config: null
+  status: updated
+  timeout: null
+  type: transformer
+  upstream_blocks:
+  - check_system_health
+  uuid: generate_observability_metrics
+- all_upstream_blocks_executed: false
+  color: null
+  configuration: {}
+  downstream_blocks: []
+  executor_config: null
+  executor_type: local_python
+  has_callback: false
+  language: python
+  name: send_alerts_if_needed
+  retry_config: null
+  status: updated
+  timeout: null
+  type: data_exporter
+  upstream_blocks:
+  - generate_observability_metrics
+  uuid: send_alerts_if_needed
+cache_block_output_in_memory: false
+callbacks: []
+concurrency_config: {}
+conditionals: []
+created_at: '2025-11-19 02:09:34.329685+00:00'
+data_integration: null
+description: null
+executor_config: {}
+executor_count: 1
+executor_type: null
+extensions: {}
+name: system_monitoring
+notification_config: {}
+remote_variables_dir: null
+retry_config: {}
+run_pipeline_in_one_process: false
+settings:
+  triggers: null
+spark_config: {}
+tags: []
+type: python
+uuid: system_monitoring
+variables_dir: /home/src/mage_data/nyc_bikes
+widgets: []

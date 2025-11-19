@@ -1,0 +1,4 @@
+{"operation": "create", "resource": {"type": "pipeline", "uuid": "small_glitter"}, "timestamp": 1763517753, "user": 1}
+{"operation": "create", "resource": {"type": "pipeline", "uuid": "data_quality_processing"}, "timestamp": 1763518135, "user": 1}
+{"operation": "create", "resource": {"type": "pipeline", "uuid": "batch_historical"}, "timestamp": 1763518160, "user": 1}
+{"operation": "create", "resource": {"type": "pipeline", "uuid": "system_monitoring"}, "timestamp": 1763518174, "user": 1}

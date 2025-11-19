@@ -98,6 +98,7 @@ services:
       DB_NAME: ${DB_NAME}
       DB_USER: ${DB_USER}
       DB_PASSWORD: ${DB_PASSWORD}
+      DB_PORT: ${DB_PORT}  # ← AGREGADO
       
       # AWS Credentials
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
@@ -106,6 +107,9 @@ services:
       
       # S3 Configuration
       BRONZE_BUCKET: ${BRONZE_BUCKET}
+      
+      # SQS Configuration ← AGREGADO
+      SQS_QUEUE_URL: ${SQS_QUEUE_URL}
     ports:
       - "6789:6789"
     volumes:

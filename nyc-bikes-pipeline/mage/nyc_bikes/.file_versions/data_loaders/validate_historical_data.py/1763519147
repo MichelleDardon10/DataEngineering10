@@ -1,0 +1,89 @@
+import boto3
+import pandas as pd
+import requests
+from datetime import datetime
+import os
+import json
+
+@data_loader
+def validate_historical_data(*args, **kwargs):
+    """
+    Validar y cargar datos históricos desde S3 público a nuestro Bronze
+    """
+    print("Validando datos históricos desde S3 público...")
+    
+    # Configuración AWS
+    aws_access_key = os.getenv('AWS_ACCESS_KEY_ID')
+    aws_secret_key = os.getenv('AWS_SECRET_ACCESS_KEY')
+    aws_region = os.getenv('AWS_DEFAULT_REGION', 'us-east-1')
+    bronze_bucket = os.getenv('BRONZE_BUCKET', 'city-data-25')
+    
+    # URL base del bucket público de Citi Bike
+    public_bucket_url = "https://s3.amazonaws.com/tripdata"
+    
+    try:
+        # Cliente S3 para nuestro bucket Bronze
+        s3 = boto3.client(
+            's3',
+            aws_access_key_id=aws_access_key,
+            aws_secret_access_key=aws_secret_key,
+            region_name=aws_region,
+            endpoint_url=os.getenv('AWS_ENDPOINT_URL')
+        )
+        
+        # Listar archivos disponibles en el bucket público
+        session = requests.Session()
+        response = session.get(public_bucket_url)
+        
+        if response.status_code != 200:
+            print("No se pudo acceder al bucket S3 público")
+            return {"status": "error", "message": "Cannot access public S3 bucket"}
+        
+        # Buscar archivos recientes (último mes como ejemplo)
+        current_year = datetime.now().year
+        current_month = datetime.now().month
+        
+        target_filename = f"{current_year}{current_month:02d}-citibike-tripdata.csv.zip"
+        file_url = f"{public_bucket_url}/{target_filename}"
+        
+        print(f"Buscando archivo: {target_filename}")
+        
+        # Verificar si el archivo existe
+        head_response = session.head(file_url)
+        if head_response.status_code != 200:
+            print(f"Archivo {target_filename} no encontrado, probando mes anterior...")
+            # Intentar mes anterior
+            current_month -= 1
+            if current_month == 0:
+                current_month = 12
+                current_year -= 1
+            target_filename = f"{current_year}{current_month:02d}-citibike-tripdata.csv.zip"
+            file_url = f"{public_bucket_url}/{target_filename}"
+        
+        print(f"Archivo a procesar: {target_filename}")
+        
+        # Verificar si ya existe en nuestro Bronze
+        bronze_key = f"historical/{target_filename}"
+        try:
+            s3.head_object(Bucket=bronze_bucket, Key=bronze_key)
+            print(f"Archivo ya existe en Bronze: {bronze_key}")
+            return {
+                "status": "exists", 
+                "filename": target_filename,
+                "bronze_key": bronze_key
+            }
+        except:
+            print(f"Archivo nuevo, será copiado a Bronze: {target_filename}")
+        
+        # Retornar metadata para el siguiente bloque
+        return {
+            "status": "new",
+            "source_url": file_url,
+            "filename": target_filename,
+            "bronze_key": bronze_key,
+            "bronze_bucket": bronze_bucket
+        }
+        
+    except Exception as e:
+        print(f"Error validando datos históricos: {e}")
+        return {"status": "error", "message": str(e)}

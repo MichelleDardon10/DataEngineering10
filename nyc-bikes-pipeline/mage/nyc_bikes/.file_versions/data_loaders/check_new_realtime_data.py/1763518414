@@ -1,0 +1,19 @@
+import pandas as pd
+from datetime import datetime
+
+@data_loader
+def check_new_realtime_data(*args, **kwargs):
+    print("Buscando nuevos datos en Bronze...")
+    
+    # Simular datos de prueba
+    data = [
+        {
+            'trip_id': 'test_001', 'bike_id': 101, 'start_time': '2024-01-15T10:00:00Z',
+            'end_time': '2024-01-15T10:30:00Z', 'start_station_id': 1, 'end_station_id': 2,
+            'rider_age': 25, 'trip_duration': 1800, 'bike_type': 'electric'
+        }
+    ]
+    
+    df = pd.DataFrame(data)
+    print(f"Encontrados {len(df)} registros nuevos")
+    return df

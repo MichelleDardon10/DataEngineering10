@@ -1,0 +1,118 @@
+import boto3
+import pandas as pd
+import json
+import os
+from datetime import datetime, timedelta
+
+@data_loader
+def check_new_realtime_data(*args, **kwargs):
+    """
+    Buscar nuevos datos REALES en Bronze layer de los últimos 15 minutos
+    """
+    print("🔍 Buscando datos NUEVOS reales en Bronze...")
+    
+    # Configuración S3
+    s3 = boto3.client(
+        's3',
+        aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+        aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
+        region_name=os.getenv('AWS_DEFAULT_REGION', 'us-east-1'),
+        endpoint_url=os.getenv('AWS_ENDPOINT_URL')
+    )
+    
+    bucket_name = os.getenv('BRONZE_BUCKET', 'city-data-25')
+    
+    # Calcular rango de tiempo (últimos 15 minutos)
+    now = datetime.utcnow()
+    start_time = now - timedelta(minutes=15)
+    
+    print(f"⏰ Buscando archivos desde: {start_time} hasta: {now}")
+    
+    try:
+        # Buscar en TODAS las carpetas de fecha/hora
+        all_objects = []
+        continuation_token = None
+        
+        # Paginación para listar todos los objetos
+        while True:
+            list_params = {
+                'Bucket': bucket_name,
+                'Prefix': 'bronze/trips/',
+                'MaxKeys': 1000
+            }
+            if continuation_token:
+                list_params['ContinuationToken'] = continuation_token
+            
+            response = s3.list_objects_v2(**list_params)
+            
+            if 'Contents' in response:
+                all_objects.extend(response['Contents'])
+            
+            if not response.get('IsTruncated'):
+                break
+            continuation_token = response.get('NextContinuationToken')
+        
+        print(f"📁 Total de objetos en Bronze: {len(all_objects)}")
+        
+        # Filtrar archivos de los últimos 15 minutos
+        new_files = []
+        for obj in all_objects:
+            file_time = obj['LastModified'].replace(tzinfo=None)
+            if start_time <= file_time <= now:
+                new_files.append({
+                    'key': obj['Key'],
+                    'size': obj['Size'],
+                    'last_modified': file_time
+                })
+        
+        print(f"🆕 Archivos nuevos encontrados: {len(new_files)}")
+        
+        # Cargar datos REALES de los archivos nuevos
+        all_data = []
+        for file_info in new_files:
+            try:
+                # Descargar archivo de S3
+                response = s3.get_object(Bucket=bucket_name, Key=file_info['key'])
+                file_content = response['Body'].read().decode('utf-8')
+                
+                # Parsear JSON (cada archivo es un trip individual)
+                trip_data = json.loads(file_content)
+                trip_data['_s3_key'] = file_info['key']
+                trip_data['_file_size'] = file_info['size']
+                trip_data['_last_modified'] = file_info['last_modified'].isoformat()
+                
+                all_data.append(trip_data)
+                
+            except Exception as e:
+                print(f"Error cargando {file_info['key']}: {e}")
+                continue
+        
+        # Crear DataFrame con datos reales
+        if all_data:
+            df = pd.DataFrame(all_data)
+            print(f"Cargados {len(df)} registros REALES de {len(new_files)} archivos")
+            
+            # Mostrar estadísticas
+            print(f"Rango temporal: {df['ingested_at'].min()} a {df['ingested_at'].max()}")
+            print(f"Tipos de bicicletas: {df['bike_type'].value_counts().to_dict()}")
+            
+        else:
+            df = pd.DataFrame()
+            print("No hay datos nuevos REALES para procesar")
+        
+        return {
+            'data': df,
+            'file_count': len(new_files),
+            'new_files': [f['key'] for f in new_files],
+            'processed_at': now.isoformat(),
+            'data_source': 'real_s3_files'
+        }
+        
+    except Exception as e:
+        print(f"❌ Error accediendo a S3: {e}")
+        return {
+            'data': pd.DataFrame(), 
+            'file_count': 0, 
+            'error': str(e),
+            'data_source': 'error'
+        }

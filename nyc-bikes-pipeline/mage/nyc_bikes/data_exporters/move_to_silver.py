@@ -1,0 +1,64 @@
+import boto3
+import json
+import os
+from datetime import datetime
+
+@data_exporter
+def move_to_silver(output, *args, **kwargs):
+    """
+    Mover datos validados a Silver layer en S3
+    """
+    if output['data'].empty:
+        print("No hay datos para mover a Silver")
+        return output
+    
+    df = output['data']
+    
+    # Configuración S3
+    s3 = boto3.client(
+        's3',
+        aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+        aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
+        region_name=os.getenv('AWS_DEFAULT_REGION', 'us-east-1'),
+        endpoint_url=os.getenv('AWS_ENDPOINT_URL')
+    )
+    
+    bucket_name = os.getenv('BRONZE_BUCKET', 'city-data-25')
+    now = datetime.utcnow()
+    
+    # Filtrar solo datos válidos para Silver
+    silver_data = df[df['is_valid_quality']].copy()
+    
+    if not silver_data.empty:
+        # Guardar cada registro en Silver
+        for _, row in silver_data.iterrows():
+            try:
+                silver_key = f"silver/trips/date={now.strftime('%Y-%m-%d')}/hour={now.strftime('%H')}/{row['trip_id']}.json"
+                
+                s3.put_object(
+                    Bucket=bucket_name,
+                    Key=silver_key,
+                    Body=json.dumps(row.to_dict(), default=str),
+                    ContentType='application/json'
+                )
+                
+            except Exception as e:
+                print(f"Error guardando {row['trip_id']} en Silver: {e}")
+    
+    print(f"{len(silver_data)} registros movidos a Silver layer")
+    
+    # Guardar reporte de calidad
+    if 'quality_stats' in output:
+        report_key = f"reports/quality/date={now.strftime('%Y-%m-%d')}/hour={now.strftime('%H')}/quality_report.json"
+        try:
+            s3.put_object(
+                Bucket=bucket_name,
+                Key=report_key,
+                Body=json.dumps(output['quality_stats'], default=str),
+                ContentType='application/json'
+            )
+            print(f"📄 Reporte de calidad guardado: {report_key}")
+        except Exception as e:
+            print(f"Error guardando reporte: {e}")
+    
+    return output

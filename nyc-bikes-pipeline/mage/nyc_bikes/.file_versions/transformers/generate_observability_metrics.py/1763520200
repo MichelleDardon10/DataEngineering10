@@ -1,0 +1,76 @@
+import pandas as pd
+from datetime import datetime
+import os  # ← ESTA LÍNEA FALTABA
+
+@transformer
+def generate_observability_metrics(health_checks, *args, **kwargs):
+    """
+    Generar métricas de observabilidad del sistema
+    """
+    print("Generando métricas de observabilidad...")
+    
+    # Determinar estado general del sistema
+    all_healthy = all(check['status'] == 'healthy' for check in health_checks.values())
+    
+    metrics = {
+        'timestamp': datetime.utcnow().isoformat(),
+        'system_status': 'healthy' if all_healthy else 'degraded',
+        'health_checks': health_checks,
+        'degraded_services': [
+            service for service, check in health_checks.items() 
+            if check['status'] != 'healthy'
+        ]
+    }
+    
+    # Agregar métricas de rendimiento
+    try:
+        import psycopg2
+        conn = psycopg2.connect(
+            host=os.getenv('DB_HOST'),
+            database=os.getenv('DB_NAME'),
+            user=os.getenv('DB_USER'),
+            password=os.getenv('DB_PASSWORD')
+        )
+        
+        # Métricas de calidad de datos recientes
+        query = """
+        SELECT 
+            AVG(quality_score) as avg_quality,
+            COUNT(*) as total_trips,
+            COUNT(CASE WHEN is_valid = true THEN 1 END) as valid_trips
+        FROM trip_metadata
+        WHERE processed_at >= NOW() - INTERVAL '1 hour'
+        """
+        
+        df = pd.read_sql(query, conn)
+        if not df.empty:
+            metrics['data_quality'] = {
+                'avg_quality_score': float(df['avg_quality'].iloc[0]) if pd.notna(df['avg_quality'].iloc[0]) else 0,
+                'total_trips_last_hour': int(df['total_trips'].iloc[0]),
+                'valid_trips_last_hour': int(df['valid_trips'].iloc[0])
+            }
+        
+        conn.close()
+    except Exception as e:
+        print(f"Error obteniendo métricas de calidad: {e}")
+    
+    # Agregar métricas de SQS si están disponibles
+    if 'sqs' in health_checks and health_checks['sqs']['status'] == 'healthy':
+        metrics['sqs_metrics'] = {
+            'message_count': health_checks['sqs'].get('message_count', 0)
+        }
+    
+    # Agregar métricas de PostgreSQL si están disponibles
+    if 'postgresql' in health_checks and health_checks['postgresql']['status'] == 'healthy':
+        metrics['database_metrics'] = {
+            'total_trips': health_checks['postgresql'].get('trip_count', 0)
+        }
+    
+    print(f"Métricas del sistema: {metrics['system_status']}")
+    print(f"Servicios degradados: {len(metrics['degraded_services'])}")
+    
+    if 'data_quality' in metrics:
+        quality = metrics['data_quality']
+        print(f"Calidad datos: {quality['avg_quality_score']:.1f} avg, {quality['valid_trips_last_hour']}/{quality['total_trips_last_hour']} válidos")
+    
+    return metrics

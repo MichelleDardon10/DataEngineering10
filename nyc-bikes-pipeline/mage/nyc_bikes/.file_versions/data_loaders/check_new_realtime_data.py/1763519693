@@ -1,0 +1,77 @@
+import boto3
+import pandas as pd
+import json
+import os
+from datetime import datetime, timedelta
+
+@data_loader
+def check_new_realtime_data(*args, **kwargs):
+    """
+    Buscar nuevos datos en Bronze layer de los últimos 15 minutos
+    """
+    print("Buscando nuevos datos en Bronze...")
+    
+    # Configuración S3
+    s3 = boto3.client(
+        's3',
+        aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+        aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
+        region_name=os.getenv('AWS_DEFAULT_REGION', 'us-east-1'),
+        endpoint_url=os.getenv('AWS_ENDPOINT_URL')
+    )
+    
+    bucket_name = os.getenv('BRONZE_BUCKET', 'city-data-25')
+    
+    # Buscar archivos de los últimos 15 minutos
+    now = datetime.utcnow()
+    start_time = now - timedelta(minutes=15)
+    
+    date_prefix = f"bronze/trips/date={now.strftime('%Y-%m-%d')}/"
+    
+    try:
+        # Listar objetos en S3
+        response = s3.list_objects_v2(
+            Bucket=bucket_name,
+            Prefix=date_prefix,
+            MaxKeys=100  # Límite para prueba
+        )
+        
+        new_files = []
+        if 'Contents' in response:
+            for obj in response['Contents']:
+                if obj['LastModified'].replace(tzinfo=None) >= start_time:
+                    new_files.append(obj['Key'])
+        
+        print(f"Encontrados {len(new_files)} archivos nuevos")
+        
+        # Cargar datos 
+        if new_files:
+            # En producción, aquí cargarías los archivos reales
+            sample_data = [{
+                'trip_id': f'test_{i}',
+                'bike_id': 100 + i,
+                'start_time': (now - timedelta(minutes=i)).isoformat() + 'Z',
+                'end_time': (now - timedelta(minutes=i-10)).isoformat() + 'Z',
+                'start_station_id': i % 50 + 1,
+                'end_station_id': (i + 5) % 50 + 1,
+                'rider_age': 25 + (i % 40),
+                'trip_duration': 1800 + (i * 60),
+                'bike_type': 'electric' if i % 2 == 0 else 'classic',
+                'ingested_at': (now - timedelta(minutes=i)).isoformat() + 'Z'
+            } for i in range(min(10, len(new_files)))]
+            
+            df = pd.DataFrame(sample_data)
+            print(f"Cargados {len(df)} registros de muestra")
+        else:
+            df = pd.DataFrame()
+            print("No hay datos nuevos para procesar")
+        
+        return {
+            'data': df,
+            'file_count': len(new_files),
+            'processed_at': now.isoformat()
+        }
+        
+    except Exception as e:
+        print(f"Error accediendo a S3: {e}")
+        return {'data': pd.DataFrame(), 'file_count': 0, 'error': str(e)}

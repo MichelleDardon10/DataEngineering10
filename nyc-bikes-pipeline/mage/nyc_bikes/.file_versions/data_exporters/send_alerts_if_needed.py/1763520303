@@ -1,0 +1,139 @@
+import boto3
+import json
+import os
+from datetime import datetime
+
+@data_exporter
+def send_alerts_if_needed(metrics, *args, **kwargs):
+    """
+    Enviar alertas si el sistema está degradado o hay problemas de calidad
+    """
+    print("Verificando alertas...")
+    
+    alerts = []
+    
+    # 1. Verificar estado general del sistema
+    if metrics['system_status'] != 'healthy':
+        degraded_services = metrics.get('degraded_services', [])
+        alert_msg = f"SISTEMA DEGRADADO - Servicios afectados: {degraded_services}"
+        print(alert_msg)
+        alerts.append({
+            'type': 'system_degraded',
+            'message': alert_msg,
+            'severity': 'high'
+        })
+    
+    # 2. Verificar calidad de datos
+    if 'data_quality' in metrics:
+        quality = metrics['data_quality']
+        avg_score = quality.get('avg_quality_score', 100)
+        total_trips = quality.get('total_trips_last_hour', 0)
+        valid_trips = quality.get('valid_trips_last_hour', 0)
+        
+        # Alerta por calidad baja
+        if avg_score < 70:
+            alert_msg = f"CALIDAD DE DATOS BAJA - Score promedio: {avg_score:.1f}"
+            print(alert_msg)
+            alerts.append({
+                'type': 'low_data_quality',
+                'message': alert_msg,
+                'severity': 'medium',
+                'avg_score': avg_score
+            })
+        
+        # Alerta por alta tasa de datos inválidos (>20%)
+        if total_trips > 0:
+            valid_ratio = valid_trips / total_trips
+            if valid_ratio < 0.8:
+                alert_msg = f"⚠️  ALTA TASA DE DATOS INVÁLIDOS - {valid_trips}/{total_trips} válidos ({valid_ratio:.1%})"
+                print(alert_msg)
+                alerts.append({
+                    'type': 'high_invalid_data',
+                    'message': alert_msg,
+                    'severity': 'medium',
+                    'valid_ratio': valid_ratio
+                })
+    
+    # 3. Verificar cola SQS saturada
+    if 'sqs_metrics' in metrics:
+        message_count = metrics['sqs_metrics'].get('message_count', 0)
+        if message_count > 1000:
+            alert_msg = f"📨 COLA SQS SATURADA - {message_count} mensajes pendientes"
+            print(alert_msg)
+            alerts.append({
+                'type': 'sqs_backlog',
+                'message': alert_msg,
+                'severity': 'medium',
+                'message_count': message_count
+            })
+    
+    # 4. Guardar métricas en S3 para dashboard
+    try:
+        s3 = boto3.client(
+            's3',
+            aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+            aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
+            region_name=os.getenv('AWS_DEFAULT_REGION', 'us-east-1'),
+            endpoint_url=os.getenv('AWS_ENDPOINT_URL')
+        )
+        
+        bucket_name = os.getenv('BRONZE_BUCKET', 'city-data-25')
+        now = datetime.utcnow()
+        
+        # Guardar métricas del sistema
+        metrics_key = f"monitoring/system_metrics/{now.strftime('%Y-%m-%d/%H')}/metrics_{now.strftime('%H%M')}.json"
+        
+        s3.put_object(
+            Bucket=bucket_name,
+            Key=metrics_key,
+            Body=json.dumps(metrics, default=str, indent=2),
+            ContentType='application/json'
+        )
+        
+        print(f"💾 Métricas guardadas en: {metrics_key}")
+        
+        # Guardar alertas si las hay
+        if alerts:
+            alerts_key = f"monitoring/alerts/{now.strftime('%Y-%m-%d')}/alerts_{now.strftime('%H%M')}.json"
+            
+            alerts_data = {
+                'timestamp': now.isoformat(),
+                'alert_count': len(alerts),
+                'alerts': alerts
+            }
+            
+            s3.put_object(
+                Bucket=bucket_name,
+                Key=alerts_key,
+                Body=json.dumps(alerts_data, default=str, indent=2),
+                ContentType='application/json'
+            )
+            
+            print(f"📢 Alertas guardadas en: {alerts_key}")
+        
+    except Exception as e:
+        print(f"❌ Error guardando en S3: {e}")
+    
+    # 5. Resumen final
+    if not alerts:
+        print("✅ Todo funcionando correctamente - Sin alertas")
+        summary = "SISTEMA SALUDABLE"
+    else:
+        print(f"📢 Se generaron {len(alerts)} alertas")
+        
+        # Contar alertas por severidad
+        high_alerts = len([a for a in alerts if a.get('severity') == 'high'])
+        medium_alerts = len([a for a in alerts if a.get('severity') == 'medium'])
+        
+        summary = f"{high_alerts} ALERTAS CRÍTICAS - {medium_alerts} ADVERTENCIAS"
+    
+    # Retornar resultado completo
+    return {
+        'timestamp': datetime.utcnow().isoformat(),
+        'system_status': metrics['system_status'],
+        'alert_count': len(alerts),
+        'alerts_generated': alerts,
+        'summary': summary,
+        'metrics_saved': True,
+        'data_quality_avg': metrics.get('data_quality', {}).get('avg_quality_score', 0)
+    }

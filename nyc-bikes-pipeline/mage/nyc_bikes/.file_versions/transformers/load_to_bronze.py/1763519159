@@ -1,0 +1,71 @@
+import boto3
+import requests
+import os
+from datetime import datetime
+
+@transformer
+def load_to_bronze(validation_result, *args, **kwargs):
+    """
+    Cargar datos históricos validados a nuestro Bronze layer
+    """
+    print("Cargando datos históricos a Bronze...")
+    
+    if validation_result.get('status') != 'new':
+        print(f"Saltando carga: {validation_result.get('status')}")
+        return validation_result
+    
+    try:
+        # Configuración AWS
+        aws_access_key = os.getenv('AWS_ACCESS_KEY_ID')
+        aws_secret_key = os.getenv('AWS_SECRET_ACCESS_KEY')
+        aws_region = os.getenv('AWS_DEFAULT_REGION', 'us-east-1')
+        
+        # Cliente S3
+        s3 = boto3.client(
+            's3',
+            aws_access_key_id=aws_access_key,
+            aws_secret_access_key=aws_secret_key,
+            region_name=aws_region,
+            endpoint_url=os.getenv('AWS_ENDPOINT_URL')
+        )
+        
+        source_url = validation_result['source_url']
+        bronze_bucket = validation_result['bronze_bucket']
+        bronze_key = validation_result['bronze_key']
+        
+        print(f"Descargando desde: {source_url}")
+        print(f"Guardando en: s3://{bronze_bucket}/{bronze_key}")
+        
+        # Descargar archivo del bucket público
+        session = requests.Session()
+        response = session.get(source_url, stream=True)
+        response.raise_for_status()
+        
+        # Subir a nuestro S3 Bronze
+        s3.upload_fileobj(
+            response.raw,
+            bronze_bucket,
+            bronze_key,
+            ExtraArgs={
+                'ContentType': 'application/zip',
+                'Metadata': {
+                    'source': 'nyc-citibike-public',
+                    'ingested_at': datetime.utcnow().isoformat(),
+                    'original_url': source_url
+                }
+            }
+        )
+        
+        print(f"✅ Archivo cargado exitosamente a Bronze: {bronze_key}")
+        
+        # Actualizar resultado
+        validation_result['loaded_at'] = datetime.utcnow().isoformat()
+        validation_result['file_size'] = len(response.content) if hasattr(response, 'content') else 'unknown'
+        
+        return validation_result
+        
+    except Exception as e:
+        print(f"❌ Error cargando a Bronze: {e}")
+        validation_result['status'] = 'error'
+        validation_result['error'] = str(e)
+        return validation_result

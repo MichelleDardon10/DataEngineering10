@@ -1,0 +1,1 @@
+{"timestamp": "2025-11-19T02:47:25.141414", "system_status": "healthy", "alert_count": 1, "alerts_generated": [{"type": "low_data_quality", "message": "CALIDAD DE DATOS BAJA - Score promedio: 0.0", "severity": "medium", "avg_score": 0}], "summary": "0 ALERTAS CR\u00cdTICAS - 1 ADVERTENCIAS", "metrics_saved": true, "data_quality_avg": 0}
