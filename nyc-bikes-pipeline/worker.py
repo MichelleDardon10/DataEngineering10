@@ -203,6 +203,7 @@ def flush_batch(partition_key):
         
         # Generate unique batch filename with timestamp
         timestamp = int(time.time() * 1000)  # milliseconds
+
         key = f"bronze/year={year}/month={month}/trip_{timestamp}.json"
         
         # Write batch to S3
